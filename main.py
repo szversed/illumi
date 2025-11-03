@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import time
+import os  # <- para pegar o token do Railway
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -148,4 +149,9 @@ async def desbanirtudo(interaction: discord.Interaction, confirm: bool):
     final_embed.set_footer(text=f"Pedido por {interaction.user}", icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
     await msg.edit(embed=final_embed)
 
-if not TOKEN: print("❌ ERRO: variável TOKEN não encontrada.") else: bot.run(TOKEN)
+# -------------------------
+# Run bot (Railway)
+# -------------------------
+TOKEN = os.getenv("TOKEN")
+if not TOKEN: print("❌ ERRO: variável TOKEN não encontrada.")
+else: bot.run(TOKEN)
