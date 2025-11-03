@@ -49,8 +49,9 @@ async def desbanirtudo(interaction: discord.Interaction, confirm: bool):
     await interaction.response.send_message("🔎 Buscando bans e iniciando desbanimento (máxima velocidade)...", ephemeral=False)
     msg = await interaction.original_response()
 
+    # Corrigido: async generator convertido para lista
     try:
-        bans = await interaction.guild.bans()
+        bans = [ban async for ban in interaction.guild.bans(limit=None)]
     except Exception as e:
         await msg.edit(content=f"❌ Erro ao buscar bans: {e}")
         return
