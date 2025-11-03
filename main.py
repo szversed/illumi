@@ -1,128 +1,124 @@
 import discord
-from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 import os
-from datetime import datetime, timedelta
 
 # -------------------------
 # Configuração do bot
 # -------------------------
 intents = discord.Intents.default()
+intents.guilds = True
 intents.members = True
-intents.message_content = True
-intents.guild_messages = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
-# Configurações gerais
+# Variáveis do servidor
 # -------------------------
-bots_permitidos = []  # IDs de bots permitidos
-antilink_ativo = True
-mutes = {}  # {user_id: timestamp_final_do_mute}
-GUILD_ID = 1420347024376725526  # ID do seu servidor
+GUILD_ORIGINAL_ID = 1420347024376725526  # ID do servidor que será clonado
+GUILD_CLONE_NAME = "Servidor Clone"       # Nome do novo servidor
+TOKEN = os.getenv("TOKEN")
 
 # -------------------------
-# Funções auxiliares
+# Função de clonagem
 # -------------------------
-def tem_cargo_soberba(member: discord.Member) -> bool:
-    return any(r.name.lower() == "soberba" for r in member.roles)
+async def clonar_servidor():
+    original = bot.get_guild(GUILD_ORIGINAL_ID)
+    if not original:
+        print("❌ Servidor original não encontrado.")
+        return
 
-async def ensure_muted_role(guild: discord.Guild):
-    role = discord.utils.get(guild.roles, name="mutado")
-    if not role:
-        role = await guild.create_role(name="mutado", reason="Cargo criado para mutes")
-        for canal in guild.channels:
-            await canal.set_permissions(role, send_messages=False, speak=False)
-    return role
+    # Cria novo servidor vazio
+    clone = await bot.create_guild(name=GUILD_CLONE_NAME)
+    print(f"✅ Servidor clone criado: {clone.name}")
+
+    # Copiar cargos
+    cargos = sorted(original.roles, key=lambda r: r.position)
+    for role in cargos:
+        if role.is_default():
+            continue
+        try:
+            await clone.create_role(
+                name=role.name,
+                permissions=role.permissions,
+                colour=role.color,
+                hoist=role.hoist,
+                mentionable=role.mentionable,
+                reason="Clone de servidor"
+            )
+        except Exception as e:
+            print(f"❌ Erro ao clonar cargo {role.name}: {e}")
+
+    print("✅ Todos os cargos foram clonados.")
+
+    # Copiar categorias e canais
+    for category in original.categories:
+        try:
+            new_category = await clone.create_category(
+                name=category.name,
+                overwrites=None,
+                reason="Clone de servidor"
+            )
+        except Exception as e:
+            print(f"❌ Erro ao criar categoria {category.name}: {e}")
+            continue
+
+        for channel in category.channels:
+            overwrites = channel.overwrites
+            try:
+                if isinstance(channel, discord.TextChannel):
+                    await clone.create_text_channel(
+                        name=channel.name,
+                        category=new_category,
+                        overwrites=overwrites,
+                        reason="Clone de servidor"
+                    )
+                elif isinstance(channel, discord.VoiceChannel):
+                    await clone.create_voice_channel(
+                        name=channel.name,
+                        category=new_category,
+                        overwrites=overwrites,
+                        bitrate=channel.bitrate,
+                        user_limit=channel.user_limit,
+                        reason="Clone de servidor"
+                    )
+            except Exception as e:
+                print(f"❌ Erro ao clonar canal {channel.name}: {e}")
+
+    # Canais fora de categoria
+    for channel in original.channels:
+        if channel.category is None:
+            try:
+                if isinstance(channel, discord.TextChannel):
+                    await clone.create_text_channel(
+                        name=channel.name,
+                        overwrites=channel.overwrites,
+                        reason="Clone de servidor"
+                    )
+                elif isinstance(channel, discord.VoiceChannel):
+                    await clone.create_voice_channel(
+                        name=channel.name,
+                        overwrites=channel.overwrites,
+                        bitrate=channel.bitrate,
+                        user_limit=channel.user_limit,
+                        reason="Clone de servidor"
+                    )
+            except Exception as e:
+                print(f"❌ Erro ao clonar canal {channel.name}: {e}")
+
+    print("✅ Todos os canais foram clonados. Nenhuma mensagem foi copiada.")
 
 # -------------------------
-# Eventos
+# Evento on_ready
 # -------------------------
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} está online e pronto!")
-    guild_obj = discord.Object(id=GUILD_ID)
-    try:
-        synced = await bot.tree.sync(guild=guild_obj)
-        print(f"✅ {len(synced)} comandos sincronizados no servidor!")
-    except Exception as e:
-        print(f"Erro ao sincronizar comandos: {e}")
-
-    verificar_mutes.start()
-    print("🔁 Verificação automática de mutes iniciada.")
-
-@bot.event
-async def on_message(message):
-    global antilink_ativo
-    if message.author.bot:
-        return
-    if antilink_ativo and ("http://" in message.content or "https://" in message.content):
-        await message.delete()
-        embed = discord.Embed(
-            description=f"🚫 {message.author.mention}, links não são permitidos!",
-            color=discord.Color.red()
-        )
-        await message.channel.send(embed=embed, delete_after=5)
-    await bot.process_commands(message)
-
-# -------------------------
-# Loop de verificação de mutes
-# -------------------------
-@tasks.loop(seconds=30)
-async def verificar_mutes():
-    agora = datetime.utcnow()
-    expirados = [user_id for user_id, fim in mutes.items() if agora >= fim]
-
-    for user_id in expirados:
-        for guild in bot.guilds:
-            member = guild.get_member(user_id)
-            if member:
-                role = discord.utils.get(guild.roles, name="mutado")
-                if role in member.roles:
-                    try:
-                        await member.remove_roles(role)
-                        print(f"🔊 {member} foi desmutado automaticamente.")
-                    except Exception:
-                        pass
-        del mutes[user_id]
-
-# -------------------------
-# Slash Commands
-# -------------------------
-@bot.tree.command(name="desbanirtudo", description="Desbanir todos os usuários banidos do servidor (somente soberba).")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def desbanirtudo(interaction: discord.Interaction):
-    if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 Permissão negada.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-    guild = interaction.guild
-    bans = await guild.bans()
-    total_desbanidos = 0
-
-    for ban_entry in bans:
-        try:
-            await guild.unban(ban_entry.user, reason=f"Desban por {interaction.user}")
-            total_desbanidos += 1
-            print(f"✅ {ban_entry.user} desbanido")
-        except Exception as e:
-            print(f"❌ Falha ao desbanir {ban_entry.user}: {e}")
-
-    embed = discord.Embed(
-        title="🔓 Desbanimento completo",
-        description=f"{total_desbanidos} usuários foram desbanidos do servidor.",
-        color=discord.Color.green()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await clonar_servidor()
+    print("✅ Clonagem do servidor finalizada.")
 
 # -------------------------
 # Run bot
 # -------------------------
-if __name__ == "__main__":
-    token = os.getenv("TOKEN")
-    if not token:
-        print("❌ ERRO: variável TOKEN não encontrada.")
-    else:
-        bot.run(token)
+if not TOKEN:
+    print("❌ ERRO: variável TOKEN não encontrada.")
+else:
+    bot.run(TOKEN)
