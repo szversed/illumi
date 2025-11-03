@@ -3,7 +3,6 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import os
 from datetime import datetime, timedelta
-import asyncio
 
 # -------------------------
 # Configuração do bot
@@ -146,7 +145,7 @@ async def menu_admin(interaction: discord.Interaction):
 🔇 `/mute <tempo> <usuários>` → Mutar usuários por X minutos  
 🚫 `/link <on|off>` → Ativa ou desativa o antilink  
 💬 `/falar <mensagem>` → Faz o bot enviar mensagem  
-🔓 `/unban_all` → Desbanir todos os usuários banidos e enviar link de convite
+🔓 `/unban_all` → Desbanir todos os usuários banidos do servidor
 """
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -256,8 +255,8 @@ async def falar(interaction: discord.Interaction, mensagem: str):
     await interaction.response.send_message("✅ Mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
 
-# Unban All
-@bot.tree.command(name="unban_all", description="Desbanir todos os usuários banidos do servidor e enviar link de convite (só soberba).")
+# Unban All (somente desbanir)
+@bot.tree.command(name="unban_all", description="Desbanir todos os usuários banidos do servidor (só soberba).")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def unban_all(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
@@ -268,20 +267,12 @@ async def unban_all(interaction: discord.Interaction):
     guild = interaction.guild
     bans = await guild.bans()
     count = 0
-    failed_dm = []
-
-    # Cria link de convite válido por 1 dia
-    invite = await guild.text_channels[0].create_invite(max_age=86400, max_uses=0, unique=True, reason="Unban All")
 
     for ban_entry in bans:
         user = ban_entry.user
         try:
             await guild.unban(user, reason=f"Desban por {interaction.user}")
             count += 1
-            try:
-                await user.send(f"Você foi desbanido do servidor **{guild.name}**! Use este link para entrar novamente:\n{invite.url}")
-            except Exception:
-                failed_dm.append(user.name)
         except Exception:
             continue
 
@@ -290,9 +281,6 @@ async def unban_all(interaction: discord.Interaction):
         description=f"{count} usuários foram desbanidos do servidor.",
         color=discord.Color.green()
     )
-    if failed_dm:
-        embed.add_field(name="Falha ao enviar DM para:", value=", ".join(failed_dm), inline=False)
-
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 # -------------------------
