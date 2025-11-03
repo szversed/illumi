@@ -1,123 +1,94 @@
 import discord
 from discord.ext import commands
-import os
+from discord import app_commands
+import asyncio
 
-# -------------------------
-# Configuração do bot
-# -------------------------
 intents = discord.Intents.default()
-intents.guilds = True
 intents.members = True
+intents.guilds = True
+intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# -------------------------
-# Variáveis do servidor
-# -------------------------
-GUILD_ORIGINAL_ID = 1420347024376725526  # ID do servidor que será clonado
-GUILD_CLONE_NAME = "Servidor Clone"       # Nome do novo servidor
-TOKEN = os.getenv("TOKEN")
+@bot.event
+async def on_ready():
+    print(f"Logado como {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Comandos sincronizados: {len(synced)}")
+    except Exception as e:
+        print(f"Erro ao sincronizar comandos: {e}")
 
 # -------------------------
-# Função de clonagem
+# Comando para clonar servidor
 # -------------------------
-async def clonar_servidor():
-    original = bot.get_guild(GUILD_ORIGINAL_ID)
-    if not original:
-        print("❌ Servidor original não encontrado.")
+@bot.tree.command(name="clonarserver", description="Clona cargos, categorias e canais do servidor atual (sem mensagens)")
+async def clonarserver(interaction: discord.Interaction):
+    await interaction.response.send_message("Iniciando clonagem...", ephemeral=True)
+    guild = interaction.guild
+    clone_name = f"{guild.name} - Clone"
+
+    try:
+        new_guild = await bot.create_guild(clone_name)
+        await asyncio.sleep(5)  # Espera o novo servidor ser criado
+    except Exception as e:
+        await interaction.followup.send(f"❌ Não foi possível criar o servidor: {e}")
         return
 
-    # Cria novo servidor vazio
-    clone = await bot.create_guild(name=GUILD_CLONE_NAME)
-    print(f"✅ Servidor clone criado: {clone.name}")
-
-    # Copiar cargos
-    cargos = sorted(original.roles, key=lambda r: r.position)
-    for role in cargos:
-        if role.is_default():
+    # -------------------------
+    # Clonar cargos
+    # -------------------------
+    for role in guild.roles:
+        if role.is_default():  # Pula o @everyone
             continue
         try:
-            await clone.create_role(
+            await new_guild.create_role(
                 name=role.name,
                 permissions=role.permissions,
                 colour=role.color,
                 hoist=role.hoist,
-                mentionable=role.mentionable,
-                reason="Clone de servidor"
+                mentionable=role.mentionable
             )
         except Exception as e:
-            print(f"❌ Erro ao clonar cargo {role.name}: {e}")
+            print(f"Erro ao criar cargo {role.name}: {e}")
 
-    print("✅ Todos os cargos foram clonados.")
-
-    # Copiar categorias e canais
-    for category in original.categories:
+    # -------------------------
+    # Clonar categorias e canais
+    # -------------------------
+    for category in guild.categories:
         try:
-            new_category = await clone.create_category(
+            new_category = await new_guild.create_category(
                 name=category.name,
-                overwrites=None,
-                reason="Clone de servidor"
+                position=category.position
             )
+            # Clonar canais da categoria
+            for channel in category.channels:
+                if isinstance(channel, discord.TextChannel):
+                    await new_guild.create_text_channel(
+                        name=channel.name,
+                        category=new_category,
+                        topic=channel.topic,
+                        nsfw=channel.nsfw,
+                        slowmode_delay=channel.slowmode_delay,
+                        position=channel.position
+                    )
+                elif isinstance(channel, discord.VoiceChannel):
+                    await new_guild.create_voice_channel(
+                        name=channel.name,
+                        category=new_category,
+                        bitrate=channel.bitrate,
+                        user_limit=channel.user_limit,
+                        position=channel.position
+                    )
         except Exception as e:
-            print(f"❌ Erro ao criar categoria {category.name}: {e}")
-            continue
+            print(f"Erro ao criar categoria {category.name}: {e}")
 
-        for channel in category.channels:
-            overwrites = channel.overwrites
-            try:
-                if isinstance(channel, discord.TextChannel):
-                    await clone.create_text_channel(
-                        name=channel.name,
-                        category=new_category,
-                        overwrites=overwrites,
-                        reason="Clone de servidor"
-                    )
-                elif isinstance(channel, discord.VoiceChannel):
-                    await clone.create_voice_channel(
-                        name=channel.name,
-                        category=new_category,
-                        overwrites=overwrites,
-                        bitrate=channel.bitrate,
-                        user_limit=channel.user_limit,
-                        reason="Clone de servidor"
-                    )
-            except Exception as e:
-                print(f"❌ Erro ao clonar canal {channel.name}: {e}")
-
-    # Canais fora de categoria
-    for channel in original.channels:
-        if channel.category is None:
-            try:
-                if isinstance(channel, discord.TextChannel):
-                    await clone.create_text_channel(
-                        name=channel.name,
-                        overwrites=channel.overwrites,
-                        reason="Clone de servidor"
-                    )
-                elif isinstance(channel, discord.VoiceChannel):
-                    await clone.create_voice_channel(
-                        name=channel.name,
-                        overwrites=channel.overwrites,
-                        bitrate=channel.bitrate,
-                        user_limit=channel.user_limit,
-                        reason="Clone de servidor"
-                    )
-            except Exception as e:
-                print(f"❌ Erro ao clonar canal {channel.name}: {e}")
-
-    print("✅ Todos os canais foram clonados. Nenhuma mensagem foi copiada.")
-
-# -------------------------
-# Evento on_ready
-# -------------------------
-@bot.event
-async def on_ready():
-    print(f"✅ {bot.user} está online e pronto!")
-    await clonar_servidor()
-    print("✅ Clonagem do servidor finalizada.")
+    await interaction.followup.send(f"✅ Servidor `{guild.name}` clonado com sucesso para `{clone_name}`!")
 
 # -------------------------
 # Run bot
 # -------------------------
+TOKEN = "SEU_TOKEN_AQUI"
 if not TOKEN:
     print("❌ ERRO: variável TOKEN não encontrada.")
 else:
