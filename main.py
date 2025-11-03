@@ -4,6 +4,9 @@ from discord.ext import commands, tasks
 import os
 from datetime import datetime, timedelta
 
+# -------------------------
+# Configuração do bot
+# -------------------------
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -12,11 +15,12 @@ intents.guild_messages = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
-# Configurações
+# Configurações gerais
 # -------------------------
 bots_permitidos = []  # IDs de bots permitidos
 antilink_ativo = True
 mutes = {}  # {user_id: timestamp_final_do_mute}
+GUILD_ID = 1420347024376725526  # ID do seu servidor
 
 # -------------------------
 # Funções auxiliares
@@ -38,18 +42,20 @@ async def ensure_muted_role(guild: discord.Guild):
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} está online e pronto!")
+
+    # Sincroniza comandos no servidor (Guild-only)
+    guild_obj = discord.Object(id=GUILD_ID)
     try:
-        synced = await bot.tree.sync()
-        print(f"✅ {len(synced)} comandos sincronizados com sucesso.")
+        synced = await bot.tree.sync(guild=guild_obj)
+        print(f"✅ {len(synced)} comandos sincronizados no servidor!")
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
-    verificar_mutes.start()  # Inicia o loop de verificação de mutes
+    verificar_mutes.start()
     print("🔁 Verificação automática de mutes iniciada.")
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    # Ban automático de bots não permitidos
     if member.bot and member.id not in bots_permitidos:
         guild = member.guild
         inviter = None
@@ -124,10 +130,12 @@ async def verificar_mutes():
         del mutes[user_id]
 
 # -------------------------
-# Slash Commands
+# Slash Commands (Guild-only)
 # -------------------------
 
+# Menu administrativo
 @bot.tree.command(name="menu_admin", description="Mostra o menu de comandos administrativos (só soberba).")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def menu_admin(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 Você não tem permissão para ver este menu.", ephemeral=True)
@@ -141,7 +149,7 @@ async def menu_admin(interaction: discord.Interaction):
 🔇 `/mute <tempo> <usuários>` → Mutar usuários por X minutos  
 🚫 `/link <on|off>` → Ativa ou desativa o antilink  
 💬 `/falar <mensagem>` → Faz o bot enviar mensagem  
-💣 `/ban_inativos` → Bane membros sem mensagens nos últimos 7 dias
+💣 `/inativos` → Bane membros sem mensagens nos últimos 7 dias
 """
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -149,6 +157,7 @@ async def menu_admin(interaction: discord.Interaction):
 # Clear
 @bot.tree.command(name="clear", description="Apaga mensagens no canal (somente soberba).")
 @app_commands.describe(quantidade="Quantidade de mensagens a apagar")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def clear(interaction: discord.Interaction, quantidade: int):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
@@ -166,6 +175,7 @@ async def clear(interaction: discord.Interaction, quantidade: int):
 # Ban
 @bot.tree.command(name="ban", description="Bane até 5 usuários (somente soberba).")
 @app_commands.describe(usuario1="Usuário 1", usuario2="Usuário 2", usuario3="Usuário 3", usuario4="Usuário 4", usuario5="Usuário 5")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def ban(interaction: discord.Interaction, usuario1: discord.Member, usuario2: discord.Member = None, usuario3: discord.Member = None, usuario4: discord.Member = None, usuario5: discord.Member = None):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
@@ -190,6 +200,7 @@ async def ban(interaction: discord.Interaction, usuario1: discord.Member, usuari
 # Mute
 @bot.tree.command(name="mute", description="Mutar usuários por X minutos (somente soberba).")
 @app_commands.describe(tempo="Tempo em minutos", usuario1="Usuário 1", usuario2="Usuário 2", usuario3="Usuário 3", usuario4="Usuário 4", usuario5="Usuário 5")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def mute(interaction: discord.Interaction, tempo: int, usuario1: discord.Member, usuario2: discord.Member = None, usuario3: discord.Member = None, usuario4: discord.Member = None, usuario5: discord.Member = None):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
@@ -217,6 +228,7 @@ async def mute(interaction: discord.Interaction, tempo: int, usuario1: discord.M
 # Link
 @bot.tree.command(name="link", description="Ativa ou desativa o antilink (somente soberba).")
 @app_commands.describe(estado="on ou off")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def link(interaction: discord.Interaction, estado: str):
     global antilink_ativo
     if not tem_cargo_soberba(interaction.user):
@@ -238,6 +250,7 @@ async def link(interaction: discord.Interaction, estado: str):
 # Falar
 @bot.tree.command(name="falar", description="Faz o bot enviar uma mensagem (somente soberba).")
 @app_commands.describe(mensagem="O que o bot deve dizer")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def falar(interaction: discord.Interaction, mensagem: str):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
@@ -246,9 +259,10 @@ async def falar(interaction: discord.Interaction, mensagem: str):
     await interaction.response.send_message("✅ Mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
 
-# Ban inativos
-@bot.tree.command(name="ban_inativos", description="Bane todos os membros que não enviaram mensagens nos últimos 7 dias (somente soberba).")
-async def ban_inativos(interaction: discord.Interaction):
+# Comando /inativos
+@bot.tree.command(name="inativos", description="Bane todos os membros que não enviaram mensagens nos últimos 7 dias (somente soberba).")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def inativos(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
         return
@@ -258,7 +272,6 @@ async def ban_inativos(interaction: discord.Interaction):
     guild = interaction.guild
     ativos = set()
 
-    # Busca mensagens recentes para identificar quem é ativo
     for canal in guild.text_channels:
         try:
             async for msg in canal.history(limit=2000, after=limite):
@@ -266,10 +279,10 @@ async def ban_inativos(interaction: discord.Interaction):
         except Exception:
             continue
 
-    inativos = [m for m in guild.members if not m.bot and m.id not in ativos]
+    inativos_list = [m for m in guild.members if not m.bot and m.id not in ativos]
 
     count = 0
-    for membro in inativos:
+    for membro in inativos_list:
         try:
             await guild.ban(membro, reason="Inatividade por mais de 7 dias")
             count += 1
