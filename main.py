@@ -43,6 +43,9 @@ async def on_ready():
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
+    verificar_mutes.start()  # Inicia o loop de verificação de mutes
+    print("🔁 Verificação automática de mutes iniciada.")
+
 @bot.event
 async def on_member_join(member: discord.Member):
     # Ban automático de bots não permitidos
@@ -97,6 +100,27 @@ async def on_message(message):
         )
         await message.channel.send(embed=embed, delete_after=5)
     await bot.process_commands(message)
+
+# -------------------------
+# Loop de verificação de mutes
+# -------------------------
+@tasks.loop(seconds=30)
+async def verificar_mutes():
+    agora = datetime.utcnow()
+    expirados = [user_id for user_id, fim in mutes.items() if agora >= fim]
+
+    for user_id in expirados:
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if member:
+                role = discord.utils.get(guild.roles, name="mutado")
+                if role in member.roles:
+                    try:
+                        await member.remove_roles(role)
+                        print(f"🔊 {member} foi desmutado automaticamente.")
+                    except Exception:
+                        pass
+        del mutes[user_id]
 
 # -------------------------
 # Slash Commands
