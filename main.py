@@ -1,160 +1,255 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
-import asyncio
-import time
-import os  # para pegar o token do Railway
-
-# -------------------------
-# Configurações
-# -------------------------
-GUILD_ID = 1420347024376725526  # sua guilda
-CONCURRENCY = 20       # máximo de unbans concorrentes
-MAX_RETRIES = 5        # tentativas em caso de erro
-UPDATE_EVERY = 10      # atualiza embed a cada X desbanheados
-UPDATE_SECONDS = 2     # ou a cada X segundos, o que ocorrer primeiro
+from discord.ext import commands, tasks
+import os
+from datetime import datetime, timedelta
 
 intents = discord.Intents.default()
-intents.guilds = True
 intents.members = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
-# Evento de inicialização
+# Configurações
+# -------------------------
+bots_permitidos = []  # IDs de bots permitidos
+antilink_ativo = True
+mutes = {}  # {user_id: timestamp_final_do_mute}
+
+# -------------------------
+# Funções auxiliares
+# -------------------------
+def tem_cargo_soberba(member: discord.Member) -> bool:
+    return any(r.name.lower() == "soberba" for r in member.roles)
+
+async def ensure_muted_role(guild: discord.Guild):
+    role = discord.utils.get(guild.roles, name="mutado")
+    if not role:
+        role = await guild.create_role(name="mutado", reason="Cargo criado para mutes")
+        for canal in guild.channels:
+            await canal.set_permissions(role, send_messages=False, speak=False)
+    return role
+
+# -------------------------
+# Eventos
 # -------------------------
 @bot.event
 async def on_ready():
-    print(f"Logado como {bot.user}")
-    guild = discord.Object(id=GUILD_ID)
-    await bot.tree.sync(guild=guild)  # sincroniza comandos apenas na guilda
-    print(f"Comandos sincronizados na guilda {GUILD_ID}")
-
-# -------------------------
-# Comando de desbanimento rápido
-# -------------------------
-@bot.tree.command(name="desbanirtudo", description="Desbaneia todos os bans do servidor na maior velocidade possível.")
-@app_commands.describe(confirm="Confirme True para executar a operação (proteção contra uso acidental).")
-async def desbanirtudo(interaction: discord.Interaction, confirm: bool):
-    if interaction.guild is None:
-        await interaction.response.send_message("❌ Este comando só pode ser usado dentro de um servidor.", ephemeral=True)
-        return
-    if not interaction.user.guild_permissions.ban_members:
-        await interaction.response.send_message("❌ Você precisa da permissão **Ban Members** para usar este comando.", ephemeral=True)
-        return
-    if not confirm:
-        await interaction.response.send_message("Ação cancelada — confirme passando `confirm: True`.", ephemeral=True)
-        return
-
-    await interaction.response.send_message("🔎 Buscando bans e iniciando desbanimento (máxima velocidade)...", ephemeral=False)
-    msg = await interaction.original_response()
-
-    # Corrigido: async generator convertido para lista
+    print(f"✅ {bot.user} está online e pronto!")
     try:
-        bans = [ban async for ban in interaction.guild.bans(limit=None)]
+        synced = await bot.tree.sync()
+        print(f"✅ {len(synced)} comandos sincronizados com sucesso.")
     except Exception as e:
-        await msg.edit(content=f"❌ Erro ao buscar bans: {e}")
+        print(f"Erro ao sincronizar comandos: {e}")
+
+    verificar_mutes.start()  # Inicia o loop de verificação de mutes
+    print("🔁 Verificação automática de mutes iniciada.")
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    # Ban automático de bots não permitidos
+    if member.bot and member.id not in bots_permitidos:
+        guild = member.guild
+        inviter = None
+        try:
+            async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
+                if entry.target.id == member.id:
+                    inviter = entry.user
+                    break
+        except Exception:
+            inviter = None
+
+        try:
+            await guild.ban(member, reason="Bot não permitido")
+        except Exception:
+            pass
+
+        canal = discord.utils.get(guild.text_channels, name="confessionário")
+        if not canal and guild.text_channels:
+            canal = guild.text_channels[0]
+
+        if inviter and not inviter.bot:
+            try:
+                await guild.ban(inviter, reason="Adicionou bot não permitido")
+            except Exception:
+                pass
+            embed = discord.Embed(
+                title="🚫 bot detectado",
+                description=f"O bot `{member.name}` foi banido automaticamente e {inviter.mention} também foi banido por adicioná-lo.",
+                color=discord.Color.red()
+            )
+        else:
+            embed = discord.Embed(
+                title="🚫 bot detectado",
+                description=f"O bot `{member.name}` foi banido automaticamente (não permitido).",
+                color=discord.Color.red()
+            )
+        await canal.send(embed=embed)
+
+@bot.event
+async def on_message(message):
+    global antilink_ativo
+    if message.author.bot:
+        return
+    if antilink_ativo and ("http://" in message.content or "https://" in message.content):
+        await message.delete()
+        embed = discord.Embed(
+            description=f"🚫 {message.author.mention}, links não são permitidos!",
+            color=discord.Color.red()
+        )
+        await message.channel.send(embed=embed, delete_after=5)
+    await bot.process_commands(message)
+
+# -------------------------
+# Loop de verificação de mutes
+# -------------------------
+@tasks.loop(seconds=30)
+async def verificar_mutes():
+    agora = datetime.utcnow()
+    expirados = [user_id for user_id, fim in mutes.items() if agora >= fim]
+
+    for user_id in expirados:
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if member:
+                role = discord.utils.get(guild.roles, name="mutado")
+                if role in member.roles:
+                    try:
+                        await member.remove_roles(role)
+                        print(f"🔊 {member} foi desmutado automaticamente.")
+                    except Exception:
+                        pass
+        del mutes[user_id]
+
+# -------------------------
+# Slash Commands
+# -------------------------
+
+@bot.tree.command(name="menu_admin", description="Mostra o menu de comandos administrativos (só soberba).")
+async def menu_admin(interaction: discord.Interaction):
+    if not tem_cargo_soberba(interaction.user):
+        await interaction.response.send_message("🚫 Você não tem permissão para ver este menu.", ephemeral=True)
         return
 
-    total = len(bans)
-    if total == 0:
-        embed = discord.Embed(title="Desbanir todos", description="Não há usuários banidos neste servidor.", color=0x2f3136)
-        await msg.edit(content=None, embed=embed)
+    texto = """
+📜 **Comandos administrativos disponíveis:**
+
+🧹 `/clear <quantidade>` → Apaga mensagens no canal  
+🔨 `/ban <usuários>` → Bane até 5 usuários  
+🔇 `/mute <tempo> <usuários>` → Mutar usuários por X minutos  
+🚫 `/link <on|off>` → Ativa ou desativa o antilink  
+💬 `/falar <mensagem>` → Faz o bot enviar mensagem
+"""
+    embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# Clear
+@bot.tree.command(name="clear", description="Apaga mensagens no canal (somente soberba).")
+@app_commands.describe(quantidade="Quantidade de mensagens a apagar")
+async def clear(interaction: discord.Interaction, quantidade: int):
+    if not tem_cargo_soberba(interaction.user):
+        await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
         return
+
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=quantidade)
+    embed = discord.Embed(
+        title="🧹 Limpeza concluída",
+        description=f"{len(deleted)} mensagens apagadas.",
+        color=discord.Color.dark_gray()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+# Ban
+@bot.tree.command(name="ban", description="Bane até 5 usuários (somente soberba).")
+@app_commands.describe(usuario1="Usuário 1", usuario2="Usuário 2", usuario3="Usuário 3", usuario4="Usuário 4", usuario5="Usuário 5")
+async def ban(interaction: discord.Interaction, usuario1: discord.Member, usuario2: discord.Member = None, usuario3: discord.Member = None, usuario4: discord.Member = None, usuario5: discord.Member = None):
+    if not tem_cargo_soberba(interaction.user):
+        await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
+        return
+
+    usuarios = [u for u in (usuario1, usuario2, usuario3, usuario4, usuario5) if u]
+    nomes = []
+    for user in usuarios:
+        try:
+            await interaction.guild.ban(user, reason=f"Banido por {interaction.user}")
+            nomes.append(user.name)
+        except Exception:
+            pass
 
     embed = discord.Embed(
-        title="Desbanir todos — progresso",
-        description=f"Iniciando desbanimento de **{total}** usuários...",
-        color=0x2fce89
+        title="🔨 Banimento",
+        description=f"{', '.join(nomes)} foram banidos e suas mensagens removidas.",
+        color=discord.Color.red()
     )
-    embed.add_field(name="Total", value=str(total), inline=True)
-    embed.add_field(name="Desbanheados", value="0", inline=True)
-    embed.add_field(name="Restantes", value=str(total), inline=True)
-    embed.set_footer(text=f"Pedido por {interaction.user}", icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
-    await msg.edit(content=None, embed=embed)
+    await interaction.response.send_message(embed=embed)
 
-    desbanheados = 0
-    last_failed = []
-    desbanheados_lock = asyncio.Lock()
-    edit_lock = asyncio.Lock()
-    last_edit_time = time.time()
-    semaphore = asyncio.Semaphore(CONCURRENCY)
+# Mute
+@bot.tree.command(name="mute", description="Mutar usuários por X minutos (somente soberba).")
+@app_commands.describe(tempo="Tempo em minutos", usuario1="Usuário 1", usuario2="Usuário 2", usuario3="Usuário 3", usuario4="Usuário 4", usuario5="Usuário 5")
+async def mute(interaction: discord.Interaction, tempo: int, usuario1: discord.Member, usuario2: discord.Member = None, usuario3: discord.Member = None, usuario4: discord.Member = None, usuario5: discord.Member = None):
+    if not tem_cargo_soberba(interaction.user):
+        await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
+        return
 
-    async def try_unban(entry: discord.BanEntry):
-        nonlocal desbanheados, last_edit_time
-        user = entry.user
-        attempts = 0
-        while attempts < MAX_RETRIES:
-            attempts += 1
-            await semaphore.acquire()
-            try:
-                await interaction.guild.unban(user, reason=f"Desbanido em massa por {interaction.user}")
-                async with desbanheados_lock:
-                    desbanheados += 1
+    role = await ensure_muted_role(interaction.guild)
+    usuarios = [u for u in (usuario1, usuario2, usuario3, usuario4, usuario5) if u]
+    nomes = []
+    fim = datetime.utcnow() + timedelta(minutes=tempo)
+    for user in usuarios:
+        try:
+            await user.add_roles(role)
+            mutes[user.id] = fim
+            nomes.append(user.name)
+        except Exception:
+            pass
 
-                now = time.time()
-                should_update = False
-                async with desbanheados_lock:
-                    if (desbanheados % UPDATE_EVERY) == 0:
-                        should_update = True
-                if (now - last_edit_time) >= UPDATE_SECONDS:
-                    should_update = True
-
-                if should_update:
-                    async with edit_lock:
-                        try:
-                            embed.set_field_at(1, name="Desbanheados", value=str(desbanheados), inline=True)
-                            embed.set_field_at(2, name="Restantes", value=str(total - desbanheados), inline=True)
-                            await msg.edit(embed=embed)
-                            last_edit_time = time.time()
-                        except Exception:
-                            pass
-                return True
-            except discord.HTTPException:
-                await asyncio.sleep(2 ** attempts * 0.1)
-            except Exception as e:
-                last_failed.append((user, str(e)))
-                return False
-            finally:
-                try:
-                    semaphore.release()
-                except Exception:
-                    pass
-
-        last_failed.append((user, f"Falha após {MAX_RETRIES} tentativas"))
-        return False
-
-    tasks = [asyncio.create_task(try_unban(entry)) for entry in bans]
-    await asyncio.gather(*tasks)
-
-    try:
-        async with edit_lock:
-            embed.set_field_at(1, name="Desbanheados", value=str(desbanheados), inline=True)
-            embed.set_field_at(2, name="Restantes", value=str(total - desbanheados), inline=True)
-            await msg.edit(embed=embed)
-    except Exception:
-        pass
-
-    final_embed = discord.Embed(
-        title="Desbanir todos — concluído",
-        description=f"✅ Operação finalizada. Desbanheados: {desbanheados}/{total}",
-        color=0x2fce89
+    embed = discord.Embed(
+        title="🔇 Usuários mutados",
+        description=f"{', '.join(nomes)} foram mutados por {tempo} minutos.",
+        color=discord.Color.purple()
     )
+    await interaction.response.send_message(embed=embed)
 
-    if last_failed:
-        failed_list = "\n".join(f"{u} — {err}" for u, err in last_failed[:20])
-        if len(last_failed) > 20:
-            failed_list += f"\n... e mais {len(last_failed)-20} falhas."
-        final_embed.add_field(name="Falhas", value=failed_list, inline=False)
+# Link
+@bot.tree.command(name="link", description="Ativa ou desativa o antilink (somente soberba).")
+@app_commands.describe(estado="on ou off")
+async def link(interaction: discord.Interaction, estado: str):
+    global antilink_ativo
+    if not tem_cargo_soberba(interaction.user):
+        await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
+        return
+
+    if estado.lower() == "on":
+        antilink_ativo = True
+        embed = discord.Embed(title="🚫 Antilink ativado", color=discord.Color.red())
+    elif estado.lower() == "off":
+        antilink_ativo = False
+        embed = discord.Embed(title="✅ Antilink desativado", color=discord.Color.green())
     else:
-        final_embed.add_field(name="Falhas", value="Nenhuma", inline=False)
+        await interaction.response.send_message("Use `on` ou `off`.", ephemeral=True)
+        return
 
-    final_embed.set_footer(text=f"Pedido por {interaction.user}", icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
-    await msg.edit(embed=final_embed)
+    await interaction.response.send_message(embed=embed)
+
+# Falar
+@bot.tree.command(name="falar", description="Faz o bot enviar uma mensagem (somente soberba).")
+@app_commands.describe(mensagem="O que o bot deve dizer")
+async def falar(interaction: discord.Interaction, mensagem: str):
+    if not tem_cargo_soberba(interaction.user):
+        await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
+        return
+
+    await interaction.response.send_message("✅ Mensagem enviada.", ephemeral=True)
+    await interaction.channel.send(mensagem)
 
 # -------------------------
-# Run bot (Railway)
+# Run bot
 # -------------------------
-TOKEN = os.getenv("TOKEN")
-if not TOKEN: print("❌ ERRO: variável TOKEN não encontrada.")
-else: bot.run(TOKEN)
+if __name__ == "__main__":
+    token = os.getenv("TOKEN")
+    if not token:
+        print("❌ ERRO: variável TOKEN não encontrada.")
+    else:
+        bot.run(token)
