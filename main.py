@@ -87,9 +87,4 @@ async def clonarserver(interaction: discord.Interaction):
 
 # -------------------------
 # Run bot
-# -------------------------
-TOKEN = "SEU_TOKEN_AQUI"
-if not TOKEN:
-    print("❌ ERRO: variável TOKEN não encontrada.")
-else:
-    bot.run(TOKEN)
+# -------------------------if not TOKEN: print("❌ ERRO: variável TOKEN não encontrada.") else: bot.run(TOKEN)
