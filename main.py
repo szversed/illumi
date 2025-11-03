@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+intents.guild_messages = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -75,13 +76,13 @@ async def on_member_join(member: discord.Member):
             except Exception:
                 pass
             embed = discord.Embed(
-                title="🚫 bot detectado",
+                title="🚫 Bot detectado",
                 description=f"O bot `{member.name}` foi banido automaticamente e {inviter.mention} também foi banido por adicioná-lo.",
                 color=discord.Color.red()
             )
         else:
             embed = discord.Embed(
-                title="🚫 bot detectado",
+                title="🚫 Bot detectado",
                 description=f"O bot `{member.name}` foi banido automaticamente (não permitido).",
                 color=discord.Color.red()
             )
@@ -139,7 +140,8 @@ async def menu_admin(interaction: discord.Interaction):
 🔨 `/ban <usuários>` → Bane até 5 usuários  
 🔇 `/mute <tempo> <usuários>` → Mutar usuários por X minutos  
 🚫 `/link <on|off>` → Ativa ou desativa o antilink  
-💬 `/falar <mensagem>` → Faz o bot enviar mensagem
+💬 `/falar <mensagem>` → Faz o bot enviar mensagem  
+💣 `/ban_inativos` → Bane membros sem mensagens nos últimos 7 dias
 """
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -180,7 +182,7 @@ async def ban(interaction: discord.Interaction, usuario1: discord.Member, usuari
 
     embed = discord.Embed(
         title="🔨 Banimento",
-        description=f"{', '.join(nomes)} foram banidos e suas mensagens removidas.",
+        description=f"{', '.join(nomes)} foram banidos.",
         color=discord.Color.red()
     )
     await interaction.response.send_message(embed=embed)
@@ -243,6 +245,43 @@ async def falar(interaction: discord.Interaction, mensagem: str):
 
     await interaction.response.send_message("✅ Mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
+
+# Ban inativos
+@bot.tree.command(name="ban_inativos", description="Bane todos os membros que não enviaram mensagens nos últimos 7 dias (somente soberba).")
+async def ban_inativos(interaction: discord.Interaction):
+    if not tem_cargo_soberba(interaction.user):
+        await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    limite = datetime.utcnow() - timedelta(days=7)
+    guild = interaction.guild
+    ativos = set()
+
+    # Busca mensagens recentes para identificar quem é ativo
+    for canal in guild.text_channels:
+        try:
+            async for msg in canal.history(limit=2000, after=limite):
+                ativos.add(msg.author.id)
+        except Exception:
+            continue
+
+    inativos = [m for m in guild.members if not m.bot and m.id not in ativos]
+
+    count = 0
+    for membro in inativos:
+        try:
+            await guild.ban(membro, reason="Inatividade por mais de 7 dias")
+            count += 1
+        except Exception:
+            pass
+
+    embed = discord.Embed(
+        title="💣 Banimento de Inativos",
+        description=f"{count} membros foram banidos por inatividade (7 dias sem mensagens).",
+        color=discord.Color.orange()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # -------------------------
 # Run bot
