@@ -3,7 +3,16 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import time
-import os  # <- para pegar o token do Railway
+import os  # para pegar o token do Railway
+
+# -------------------------
+# Configurações
+# -------------------------
+GUILD_ID = 1420347024376725526  # sua guilda
+CONCURRENCY = 20       # máximo de unbans concorrentes
+MAX_RETRIES = 5        # tentativas em caso de erro
+UPDATE_EVERY = 10      # atualiza embed a cada X desbanheados
+UPDATE_SECONDS = 2     # ou a cada X segundos, o que ocorrer primeiro
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -12,21 +21,14 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
-# Configurações de performance máxima
+# Evento de inicialização
 # -------------------------
-CONCURRENCY = 20       # máximo de unbans concorrentes
-MAX_RETRIES = 5        # tentativas em caso de erro
-UPDATE_EVERY = 10      # atualiza embed a cada X desbanheados
-UPDATE_SECONDS = 2     # ou a cada X segundos, o que ocorrer primeiro
-
 @bot.event
 async def on_ready():
     print(f"Logado como {bot.user}")
-    try:
-        await bot.tree.sync()
-        print("Comandos sincronizados.")
-    except Exception as e:
-        print("Erro ao sincronizar comandos:", e)
+    guild = discord.Object(id=GUILD_ID)
+    await bot.tree.sync(guild=guild)  # sincroniza comandos apenas na guilda
+    print(f"Comandos sincronizados na guilda {GUILD_ID}")
 
 # -------------------------
 # Comando de desbanimento rápido
