@@ -145,7 +145,7 @@ async def menu_admin(interaction: discord.Interaction):
 🔇 `/mute <tempo> <usuários>` → Mutar usuários por X minutos  
 🚫 `/link <on|off>` → Ativa ou desativa o antilink  
 💬 `/falar <mensagem>` → Faz o bot enviar mensagem  
-🔓 `/unban_all` → Desbanir todos os usuários banidos do servidor
+🔓 `/unban_all` → Desbanir todos os usuários banidos do servidor rapidamente
 """
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -251,11 +251,12 @@ async def falar(interaction: discord.Interaction, mensagem: str):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
         return
-
     await interaction.response.send_message("✅ Mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
 
-# Unban All (somente desbanir)
+# -------------------------
+# Unban All - rápido
+# -------------------------
 @bot.tree.command(name="unban_all", description="Desbanir todos os usuários banidos do servidor (só soberba).")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def unban_all(interaction: discord.Interaction):
@@ -268,20 +269,20 @@ async def unban_all(interaction: discord.Interaction):
     bans = await guild.bans()
     count = 0
 
-    # Mensagem inicial
-    mensagem = await interaction.followup.send(f"🔓 Iniciando desbanimento de {len(bans)} usuários...", ephemeral=True)
-
+    # Desbanir todos sem delay
     for ban_entry in bans:
-        user = ban_entry.user
         try:
-            await guild.unban(user, reason=f"Desban por {interaction.user}")
+            await guild.unban(ban_entry.user, reason=f"Desban por {interaction.user}")
             count += 1
-            # Atualiza mensagem em tempo real
-            await mensagem.edit(content=f"🔓 Desbanindo usuários... {count}/{len(bans)} concluído.")
         except Exception:
             continue
 
-    await mensagem.edit(content=f"✅ Desbanimento completo! {count} usuários foram desbanidos.")
+    embed = discord.Embed(
+        title="🔓 Desbanimento completo",
+        description=f"{count} usuários foram desbanidos do servidor.",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # -------------------------
 # Run bot
