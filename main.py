@@ -268,20 +268,20 @@ async def unban_all(interaction: discord.Interaction):
     bans = await guild.bans()
     count = 0
 
+    # Mensagem inicial
+    mensagem = await interaction.followup.send(f"🔓 Iniciando desbanimento de {len(bans)} usuários...", ephemeral=True)
+
     for ban_entry in bans:
         user = ban_entry.user
         try:
             await guild.unban(user, reason=f"Desban por {interaction.user}")
             count += 1
+            # Atualiza mensagem em tempo real
+            await mensagem.edit(content=f"🔓 Desbanindo usuários... {count}/{len(bans)} concluído.")
         except Exception:
             continue
 
-    embed = discord.Embed(
-        title="🔓 Desbanimento completo",
-        description=f"{count} usuários foram desbanidos do servidor.",
-        color=discord.Color.green()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await mensagem.edit(content=f"✅ Desbanimento completo! {count} usuários foram desbanidos.")
 
 # -------------------------
 # Run bot
