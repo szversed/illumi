@@ -148,9 +148,4 @@ async def desbanirtudo(interaction: discord.Interaction, confirm: bool):
     final_embed.set_footer(text=f"Pedido por {interaction.user}", icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
     await msg.edit(embed=final_embed)
 
-# -------------------------
-# Run bot
-# -------------------------
-TOKEN = "SEU_TOKEN_AQUI"
-if not TOKEN: print("❌ ERRO: variável TOKEN não encontrada.")
-else: bot.run(TOKEN)
+if not TOKEN: print("❌ ERRO: variável TOKEN não encontrada.") else: bot.run(TOKEN)
