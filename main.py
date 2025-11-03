@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import os
 from datetime import datetime, timedelta
+import asyncio
 
 # -------------------------
 # Configuração do bot
@@ -42,8 +43,6 @@ async def ensure_muted_role(guild: discord.Guild):
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} está online e pronto!")
-
-    # Sincroniza comandos no servidor (Guild-only)
     guild_obj = discord.Object(id=GUILD_ID)
     try:
         synced = await bot.tree.sync(guild=guild_obj)
@@ -130,10 +129,8 @@ async def verificar_mutes():
         del mutes[user_id]
 
 # -------------------------
-# Slash Commands (Guild-only)
+# Slash Commands
 # -------------------------
-
-# Menu administrativo
 @bot.tree.command(name="menu_admin", description="Mostra o menu de comandos administrativos (só soberba).")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def menu_admin(interaction: discord.Interaction):
@@ -149,7 +146,7 @@ async def menu_admin(interaction: discord.Interaction):
 🔇 `/mute <tempo> <usuários>` → Mutar usuários por X minutos  
 🚫 `/link <on|off>` → Ativa ou desativa o antilink  
 💬 `/falar <mensagem>` → Faz o bot enviar mensagem  
-💣 `/inativos` → Bane membros sem mensagens nos últimos 7 dias
+🔓 `/unban_all` → Desbanir todos os usuários banidos e enviar link de convite
 """
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -259,41 +256,43 @@ async def falar(interaction: discord.Interaction, mensagem: str):
     await interaction.response.send_message("✅ Mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
 
-# Comando /inativos
-@bot.tree.command(name="inativos", description="Bane todos os membros que não enviaram mensagens nos últimos 7 dias (somente soberba).")
+# Unban All
+@bot.tree.command(name="unban_all", description="Desbanir todos os usuários banidos do servidor e enviar link de convite (só soberba).")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-async def inativos(interaction: discord.Interaction):
+async def unban_all(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 Permissão negada (soberba necessária).", ephemeral=True)
+        await interaction.response.send_message("🚫 Permissão negada.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
-    limite = datetime.utcnow() - timedelta(days=7)
     guild = interaction.guild
-    ativos = set()
+    bans = await guild.bans()
+    count = 0
+    failed_dm = []
 
-    for canal in guild.text_channels:
+    # Cria link de convite válido por 1 dia
+    invite = await guild.text_channels[0].create_invite(max_age=86400, max_uses=0, unique=True, reason="Unban All")
+
+    for ban_entry in bans:
+        user = ban_entry.user
         try:
-            async for msg in canal.history(limit=2000, after=limite):
-                ativos.add(msg.author.id)
+            await guild.unban(user, reason=f"Desban por {interaction.user}")
+            count += 1
+            try:
+                await user.send(f"Você foi desbanido do servidor **{guild.name}**! Use este link para entrar novamente:\n{invite.url}")
+            except Exception:
+                failed_dm.append(user.name)
         except Exception:
             continue
 
-    inativos_list = [m for m in guild.members if not m.bot and m.id not in ativos]
-
-    count = 0
-    for membro in inativos_list:
-        try:
-            await guild.ban(membro, reason="Inatividade por mais de 7 dias")
-            count += 1
-        except Exception:
-            pass
-
     embed = discord.Embed(
-        title="💣 Banimento de Inativos",
-        description=f"{count} membros foram banidos por inatividade (7 dias sem mensagens).",
-        color=discord.Color.orange()
+        title="🔓 Desbanimento completo",
+        description=f"{count} usuários foram desbanidos do servidor.",
+        color=discord.Color.green()
     )
+    if failed_dm:
+        embed.add_field(name="Falha ao enviar DM para:", value=", ".join(failed_dm), inline=False)
+
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 # -------------------------
