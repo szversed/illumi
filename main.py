@@ -11,6 +11,11 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
+# Variáveis globais para convites
+# -------------------------
+invites_cache = {}
+
+# -------------------------
 # Configurações
 # -------------------------
 bots_permitidos = []  # IDs de bots permitidos
@@ -45,6 +50,28 @@ async def on_ready():
 
     verificar_mutes.start()  # Inicia o loop de verificação de mutes
     print("🔁 Verificação automática de mutes iniciada.")
+    await update_invites_cache() # Carrega o cache de convites ao iniciar
+
+@bot.event
+async def on_invite_create(invite):
+    guild_id = invite.guild.id
+    if guild_id not in invites_cache:
+        invites_cache[guild_id] = {}
+    invites_cache[guild_id][invite.code] = invite
+
+@bot.event
+async def on_invite_delete(invite):
+    guild_id = invite.guild.id
+    if guild_id in invites_cache and invite.code in invites_cache[guild_id]:
+        del invites_cache[guild_id][invite.code]
+
+async def update_invites_cache():
+    for guild in bot.guilds:
+        try:
+            invites_cache[guild.id] = {invite.code: invite for invite in await guild.invites()}
+        except discord.Forbidden:
+            print(f"🚫 Sem permissão para ver convites no servidor {guild.name}")
+    print("✅ Cache de convites atualizado.")
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -125,6 +152,75 @@ async def verificar_mutes():
 # -------------------------
 # Slash Commands
 # -------------------------
+
+# Convidados
+@bot.tree.command(name="convidados", description="Mostra o número de convites do servidor (total ou por usuário).")
+@app_commands.describe(usuario="Opcional: Mencione um usuário para ver quantos ele convidou.")
+async def convidados(interaction: discord.Interaction, usuario: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    
+    try:
+        invites = await guild.invites()
+    except discord.Forbidden:
+        await interaction.followup.send("🚫 Não tenho permissão para ver os convites deste servidor. Verifique se a permissão 'Gerenciar Convites' está ativada para o bot.", ephemeral=True)
+        return
+
+    if usuario:
+        # Modo: /convidados @usuario
+        total_convites = 0
+        for invite in invites:
+            if invite.inviter and invite.inviter.id == usuario.id:
+                total_convites += invite.uses
+        
+        embed = discord.Embed(
+            title="👥 Convites de Usuário",
+            description=f"O usuário {usuario.mention} convidou **{total_convites}** pessoas para o servidor.",
+            color=discord.Color.blue()
+        )
+    else:
+        # Modo: /convidados (total)
+        inviter_counts = {}
+        total_convites = 0
+        
+        for invite in invites:
+            if invite.inviter:
+                inviter_id = invite.inviter.id
+                inviter_counts[inviter_id] = inviter_counts.get(inviter_id, 0) + invite.uses
+                total_convites += invite.uses
+        
+        # Ordena e pega os top 5
+        top_inviters = sorted(inviter_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        
+        description = f"**Total de convites rastreados:** {total_convites}\n\n"
+        
+        if top_inviters:
+            description += "**Top 5 Convites:**\n"
+            for inviter_id, count in top_inviters:
+                inviter = guild.get_member(inviter_id)
+                if inviter:
+                    description += f"• {inviter.mention}: **{count}** convites\n"
+                else:
+                    # Tenta pegar o usuário do cache de convites, se não for membro
+                    # Isso é um fallback, mas o ideal é que o inviter seja um membro.
+                    inviter_user = bot.get_user(inviter_id)
+                    if inviter_user:
+                        description += f"• {inviter_user.name} (Não Membro): **{count}** convites\n"
+                    else:
+                        description += f"• Usuário Desconhecido (ID: {inviter_id}): **{count}** convites\n"
+        else:
+            description += "Nenhum convite rastreado ainda."
+            
+        embed = discord.Embed(
+            title="📊 Estatísticas de Convites",
+            description=description,
+            color=discord.Color.green()
+        )
+
+    await interaction.followup.send(embed=embed)
+
+# Menu Admin
 
 @bot.tree.command(name="menu_admin", description="Mostra o menu de comandos administrativos (só soberba).")
 async def menu_admin(interaction: discord.Interaction):
