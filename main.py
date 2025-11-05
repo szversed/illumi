@@ -47,16 +47,18 @@ async def atualizar_convites(guild: discord.Guild):
 async def on_ready():
     print(f"✅ {bot.user} está online e pronto!")
     try:
-        synced = await bot.tree.sync(guild=discord.Object(id=1420347024376725526))
-        print(f"✅ {len(synced)} comandos sincronizados com sucesso.")
+        guild = discord.Object(id=1420347024376725526)
+        await bot.tree.sync(guild=guild)
+        print("✅ comandos sincronizados (sem duplicar).")
     except Exception as e:
         print(f"erro ao sincronizar comandos: {e}")
 
     for guild in bot.guilds:
         await atualizar_convites(guild)
 
-    verificar_mutes.start()
-    print("🔁 loop de mutes iniciado.")
+    if not verificar_mutes.is_running():
+        verificar_mutes.start()
+        print("🔁 loop de mutes iniciado.")
 
 @bot.event
 async def on_member_join(member):
@@ -90,7 +92,6 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_remove(member):
-    # se quem saiu foi convidado, remove da lista de quem convidou
     for criador_id, lista in list(convites_por_usuario.items()):
         if member.id in lista:
             lista.remove(member.id)
@@ -145,8 +146,8 @@ async def menu_admin(interaction: discord.Interaction):
 📜 **comandos administrativos:**
 
 🧹 `/clear <quantidade>`  
-🔨 `/ban <usuários>`  
-🔇 `/mute <tempo> <usuários>`  
+🔨 `/ban <usuário>`  
+🔇 `/mute <tempo> <usuário>`  
 🚫 `/link <on|off>`  
 💬 `/falar <mensagem>`  
 👥 `/convidados <usuário>`
@@ -164,7 +165,7 @@ async def clear(interaction: discord.Interaction, quantidade: int):
     embed = discord.Embed(title="🧹 limpeza concluída", description=f"{len(deleted)} mensagens apagadas.", color=discord.Color.dark_gray())
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="ban", description="bane usuários.", guild=discord.Object(id=1420347024376725526))
+@bot.tree.command(name="ban", description="bane usuário.", guild=discord.Object(id=1420347024376725526))
 async def ban(interaction: discord.Interaction, usuario: discord.Member):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
