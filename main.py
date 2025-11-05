@@ -38,14 +38,18 @@ async def atualizar_convites(guild: discord.Guild):
 
 @bot.event
 async def on_ready():
-    print(f"✅ {bot.user} está online e pronto!")
+    print(f"✅ {bot.user} está online!")
 
     guild = discord.Object(id=GUILD_ID)
-    try:
-        synced = await bot.tree.sync(guild=guild)
-        print(f"✅ {len(synced)} comandos sincronizados.")
-    except Exception as e:
-        print(f"erro ao sincronizar comandos: {e}")
+
+    # evita duplicação de comandos
+    if not hasattr(bot, "synced"):
+        try:
+            await bot.tree.sync(guild=guild)
+            bot.synced = True
+            print("✅ comandos sincronizados (uma vez).")
+        except Exception as e:
+            print(f"erro ao sincronizar comandos: {e}")
 
     for g in bot.guilds:
         await atualizar_convites(g)
