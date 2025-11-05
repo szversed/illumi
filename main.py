@@ -8,14 +8,12 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-GUILD_ID = 1420347024376725526
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 antilink_ativo = True
 mutes = {}
-convites_anteriores = {}
-convidados = {}
+invite_cache = {}
+convites_por_usuario = {}  # {id_inviter: [ids_de_convidados_que_ainda_estão]}
 
 # -------------------------
 # funções
@@ -31,19 +29,12 @@ async def ensure_muted_role(guild: discord.Guild):
             await canal.set_permissions(role, send_messages=False, speak=False)
     return role
 
-async def atualizar_convites(guild):
-    convites = await guild.invites()
-    convites_anteriores[guild.id] = {convite.code: convite.uses for convite in convites}
-
-async def encontrar_convite_usado(guild):
-    convites_novos = await guild.invites()
-    convites_velhos = convites_anteriores.get(guild.id, {})
-    for convite in convites_novos:
-        if convite.uses > convites_velhos.get(convite.code, 0):
-            convites_anteriores[guild.id] = {c.code: c.uses for c in convites_novos}
-            return convite
-    convites_anteriores[guild.id] = {c.code: c.uses for c in convites_novos}
-    return None
+async def atualizar_convites(guild: discord.Guild):
+    try:
+        convites = await guild.invites()
+        invite_cache[guild.id] = {i.code: i.uses for i in convites}
+    except Exception:
+        invite_cache[guild.id] = {}
 
 # -------------------------
 # eventos
@@ -52,27 +43,15 @@ async def encontrar_convite_usado(guild):
 async def on_ready():
     print(f"✅ {bot.user} está online!")
 
-    guild = discord.Object(id=GUILD_ID)
-
-    # remove comandos globais
+    # sincroniza comandos globais apenas uma vez
     try:
-        await bot.tree.clear_commands()
-        await bot.tree.sync()
-        print("🗑️ comandos globais removidos.")
+        synced = await bot.tree.sync()
+        print(f"✅ {len(synced)} comandos sincronizados globalmente.")
     except Exception as e:
-        print(f"erro ao limpar comandos globais: {e}")
+        print(f"erro ao sincronizar comandos: {e}")
 
-    # sincroniza só comandos da guild
-    if not hasattr(bot, "synced"):
-        try:
-            await bot.tree.sync(guild=guild)
-            bot.synced = True
-            print("✅ comandos sincronizados apenas na guild.")
-        except Exception as e:
-            print(f"erro ao sincronizar comandos: {e}")
-
-    for g in bot.guilds:
-        await atualizar_convites(g)
+    for guild in bot.guilds:
+        await atualizar_convites(guild)
 
     if not verificar_mutes.is_running():
         verificar_mutes.start()
@@ -80,21 +59,45 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
-    convite_usado = await encontrar_convite_usado(member.guild)
-    if convite_usado:
-        convidador = convite_usado.inviter
-        convidados.setdefault(convidador.id, []).append(member.id)
+    guild = member.guild
+    antes = invite_cache.get(guild.id, {})
+    depois = {}
+    try:
+        convites = await guild.invites()
+        depois = {i.code: i.uses for i in convites}
+    except Exception:
+        pass
+
+    usado = None
+    for codigo, usos in depois.items():
+        if codigo in antes and usos > antes[codigo]:
+            usado = codigo
+            break
+
+    if usado:
+        criador = None
+        for i in convites:
+            if i.code == usado:
+                criador = i.inviter
+                break
+        if criador:
+            if criador.id not in convites_por_usuario:
+                convites_por_usuario[criador.id] = []
+            convites_por_usuario[criador.id].append(member.id)
+
+    invite_cache[guild.id] = depois
 
 @bot.event
 async def on_member_remove(member):
-    for convidador_id, lista in convidados.items():
+    for criador_id, lista in list(convites_por_usuario.items()):
         if member.id in lista:
             lista.remove(member.id)
+            if not lista:
+                del convites_por_usuario[criador_id]
             break
 
 @bot.event
 async def on_message(message):
-    global antilink_ativo
     if message.author.bot:
         return
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
@@ -109,23 +112,23 @@ async def on_message(message):
 @tasks.loop(seconds=30)
 async def verificar_mutes():
     agora = datetime.utcnow()
-    expirados = [uid for uid, fim in mutes.items() if agora >= fim]
-    for uid in expirados:
+    expirados = [user_id for user_id, fim in mutes.items() if agora >= fim]
+    for user_id in expirados:
         for guild in bot.guilds:
-            member = guild.get_member(uid)
+            member = guild.get_member(user_id)
             if member:
                 role = discord.utils.get(guild.roles, name="mutado")
-                if role and role in member.roles:
+                if role in member.roles:
                     try:
                         await member.remove_roles(role)
                     except Exception:
                         pass
-        del mutes[uid]
+        del mutes[user_id]
 
 # -------------------------
-# comandos slash
+# comandos administrativos globais
 # -------------------------
-@bot.tree.command(name="menu_admin", description="menu de comandos administrativos.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="menu_admin", description="menu de comandos administrativos.")
 async def menu_admin(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
@@ -133,17 +136,17 @@ async def menu_admin(interaction: discord.Interaction):
     texto = """
 📜 **comandos administrativos:**
 
-🧹 `/clear <quantidade>`  
-🔨 `/ban <usuário>`  
-🔇 `/mute <tempo> <usuário>`  
-🚫 `/link <on|off>`  
-💬 `/falar <mensagem>`  
-👥 `/convidados <usuário>`
+🧹 /clear <quantidade>  
+🔨 /ban <usuário>  
+🔇 /mute <tempo> <usuário>  
+🚫 /link <on|off>  
+💬 /falar <mensagem>  
+👥 /convidados <usuário>
 """
     embed = discord.Embed(title="👑 menu administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="clear", description="apaga mensagens.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="clear", description="apaga mensagens.")
 async def clear(interaction: discord.Interaction, quantidade: int):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
@@ -153,7 +156,7 @@ async def clear(interaction: discord.Interaction, quantidade: int):
     embed = discord.Embed(title="🧹 limpeza concluída", description=f"{len(deleted)} mensagens apagadas.", color=discord.Color.dark_gray())
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="ban", description="bane usuário.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="ban", description="bane usuário.")
 async def ban(interaction: discord.Interaction, usuario: discord.Member):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
@@ -165,7 +168,7 @@ async def ban(interaction: discord.Interaction, usuario: discord.Member):
     except Exception:
         await interaction.response.send_message("erro ao banir.", ephemeral=True)
 
-@bot.tree.command(name="mute", description="muta usuário por x minutos.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="mute", description="muta usuário por x minutos.")
 async def mute(interaction: discord.Interaction, tempo: int, usuario: discord.Member):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
@@ -180,7 +183,7 @@ async def mute(interaction: discord.Interaction, tempo: int, usuario: discord.Me
     except Exception:
         await interaction.response.send_message("erro ao mutar.", ephemeral=True)
 
-@bot.tree.command(name="link", description="ativa/desativa o antilink.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="link", description="ativa/desativa o antilink.")
 async def link(interaction: discord.Interaction, estado: str):
     global antilink_ativo
     if not tem_cargo_soberba(interaction.user):
@@ -197,7 +200,7 @@ async def link(interaction: discord.Interaction, estado: str):
         return
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="falar", description="faz o bot enviar uma mensagem.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="falar", description="faz o bot enviar uma mensagem.")
 async def falar(interaction: discord.Interaction, mensagem: str):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
@@ -205,15 +208,15 @@ async def falar(interaction: discord.Interaction, mensagem: str):
     await interaction.response.send_message("✅ mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
 
-@bot.tree.command(name="convidados", description="mostra quantos membros o usuário manteve no servidor.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="convidados", description="mostra quantos membros o usuário manteve no servidor.")
 async def convidados_cmd(interaction: discord.Interaction, usuario: discord.Member = None):
     usuario = usuario or interaction.user
-    total = len(convidados.get(usuario.id, []))
-    nomes = [interaction.guild.get_member(uid).display_name for uid in convidados.get(usuario.id, []) if interaction.guild.get_member(uid)]
-    desc = f"{usuario.mention} manteve **{total} pessoas** no servidor.\n"
-    if nomes:
-        desc += "👥 " + ", ".join(nomes)
-    embed = discord.Embed(title="👥 convites", description=desc, color=discord.Color.blurple())
+    total = len(convites_por_usuario.get(usuario.id, []))
+    embed = discord.Embed(
+        title="👥 convites",
+        description=f"{usuario.mention} manteve **{total} pessoas** no servidor.",
+        color=discord.Color.blurple()
+    )
     await interaction.response.send_message(embed=embed)
 
 # -------------------------
