@@ -4,20 +4,22 @@ from discord.ext import commands, tasks
 import os
 from datetime import datetime, timedelta
 
-GUILD_ID = 1420347024376725526
-
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
+GUILD_ID = 1420347024376725526
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-bots_permitidos = []
 antilink_ativo = True
 mutes = {}
-invite_cache = {}
-convites_por_usuario = {}
+convites_anteriores = {}
+convidados = {}
 
+# -------------------------
+# funções
+# -------------------------
 def tem_cargo_soberba(member: discord.Member) -> bool:
     return any(r.name.lower() == "soberba" for r in member.roles)
 
@@ -29,25 +31,43 @@ async def ensure_muted_role(guild: discord.Guild):
             await canal.set_permissions(role, send_messages=False, speak=False)
     return role
 
-async def atualizar_convites(guild: discord.Guild):
-    try:
-        convites = await guild.invites()
-        invite_cache[guild.id] = {i.code: i.uses for i in convites}
-    except Exception:
-        invite_cache[guild.id] = {}
+async def atualizar_convites(guild):
+    convites = await guild.invites()
+    convites_anteriores[guild.id] = {convite.code: convite.uses for convite in convites}
 
+async def encontrar_convite_usado(guild):
+    convites_novos = await guild.invites()
+    convites_velhos = convites_anteriores.get(guild.id, {})
+    for convite in convites_novos:
+        if convite.uses > convites_velhos.get(convite.code, 0):
+            convites_anteriores[guild.id] = {c.code: c.uses for c in convites_novos}
+            return convite
+    convites_anteriores[guild.id] = {c.code: c.uses for c in convites_novos}
+    return None
+
+# -------------------------
+# eventos
+# -------------------------
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} está online!")
 
     guild = discord.Object(id=GUILD_ID)
 
-    # evita duplicação de comandos
+    # remove comandos globais
+    try:
+        await bot.tree.clear_commands()
+        await bot.tree.sync()
+        print("🗑️ comandos globais removidos.")
+    except Exception as e:
+        print(f"erro ao limpar comandos globais: {e}")
+
+    # sincroniza só comandos da guild
     if not hasattr(bot, "synced"):
         try:
             await bot.tree.sync(guild=guild)
             bot.synced = True
-            print("✅ comandos sincronizados (uma vez).")
+            print("✅ comandos sincronizados apenas na guild.")
         except Exception as e:
             print(f"erro ao sincronizar comandos: {e}")
 
@@ -60,35 +80,16 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
-    guild = member.guild
-    antes = invite_cache.get(guild.id, {})
-    depois = {}
-    try:
-        convites = await guild.invites()
-        depois = {i.code: i.uses for i in convites}
-    except Exception:
-        pass
-
-    usado = None
-    for codigo, usos in depois.items():
-        if codigo in antes and usos > antes[codigo]:
-            usado = codigo
-            break
-
-    if usado:
-        criador = next((i.inviter for i in convites if i.code == usado), None)
-        if criador:
-            convites_por_usuario.setdefault(criador.id, []).append(member.id)
-
-    invite_cache[guild.id] = depois
+    convite_usado = await encontrar_convite_usado(member.guild)
+    if convite_usado:
+        convidador = convite_usado.inviter
+        convidados.setdefault(convidador.id, []).append(member.id)
 
 @bot.event
 async def on_member_remove(member):
-    for criador_id, lista in list(convites_por_usuario.items()):
+    for convidador_id, lista in convidados.items():
         if member.id in lista:
             lista.remove(member.id)
-            if not lista:
-                del convites_por_usuario[criador_id]
             break
 
 @bot.event
@@ -98,13 +99,13 @@ async def on_message(message):
         return
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
         await message.delete()
-        embed = discord.Embed(
-            description=f"🚫 {message.author.mention}, links não são permitidos!",
-            color=discord.Color.red()
-        )
+        embed = discord.Embed(description=f"🚫 {message.author.mention}, links não são permitidos!", color=discord.Color.red())
         await message.channel.send(embed=embed, delete_after=5)
     await bot.process_commands(message)
 
+# -------------------------
+# loop de mutes
+# -------------------------
 @tasks.loop(seconds=30)
 async def verificar_mutes():
     agora = datetime.utcnow()
@@ -121,8 +122,9 @@ async def verificar_mutes():
                         pass
         del mutes[uid]
 
-# ------------------------- comandos -------------------------
-
+# -------------------------
+# comandos slash
+# -------------------------
 @bot.tree.command(name="menu_admin", description="menu de comandos administrativos.", guild=discord.Object(id=GUILD_ID))
 async def menu_admin(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
@@ -203,14 +205,15 @@ async def falar(interaction: discord.Interaction, mensagem: str):
     await interaction.response.send_message("✅ mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
 
-@bot.tree.command(name="convidados", description="mostra quantas pessoas o usuário manteve no servidor.", guild=discord.Object(id=GUILD_ID))
-async def convidados(interaction: discord.Interaction, usuario: discord.Member):
-    total = len(convites_por_usuario.get(usuario.id, []))
-    embed = discord.Embed(
-        title="👥 convites",
-        description=f"{usuario.mention} trouxe e **manteve {total} pessoas** no servidor.",
-        color=discord.Color.blurple()
-    )
+@bot.tree.command(name="convidados", description="mostra quantos membros o usuário manteve no servidor.", guild=discord.Object(id=GUILD_ID))
+async def convidados_cmd(interaction: discord.Interaction, usuario: discord.Member = None):
+    usuario = usuario or interaction.user
+    total = len(convidados.get(usuario.id, []))
+    nomes = [interaction.guild.get_member(uid).display_name for uid in convidados.get(usuario.id, []) if interaction.guild.get_member(uid)]
+    desc = f"{usuario.mention} manteve **{total} pessoas** no servidor.\n"
+    if nomes:
+        desc += "👥 " + ", ".join(nomes)
+    embed = discord.Embed(title="👥 convites", description=desc, color=discord.Color.blurple())
     await interaction.response.send_message(embed=embed)
 
 # -------------------------
