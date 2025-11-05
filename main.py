@@ -26,7 +26,10 @@ async def ensure_muted_role(guild: discord.Guild):
     if not role:
         role = await guild.create_role(name="mutado", reason="cargo criado para mutes")
         for canal in guild.channels:
-            await canal.set_permissions(role, send_messages=False, speak=False)
+            try:
+                await canal.set_permissions(role, send_messages=False, speak=False)
+            except Exception:
+                pass
     return role
 
 async def atualizar_convites(guild: discord.Guild):
@@ -43,18 +46,20 @@ async def atualizar_convites(guild: discord.Guild):
 async def on_ready():
     print(f"✅ {bot.user} está online!")
 
-    # limpa todos os comandos de guild para evitar duplicação
+    # limpa comandos das guilds e sincroniza
     for guild in bot.guilds:
-        await bot.tree.clear_commands(guild=guild)
+        bot.tree.clear_commands(guild=guild)  # sem await
         await bot.tree.sync(guild=guild)
 
-    # sincroniza apenas comandos globais
+    # sincroniza comandos globais
     await bot.tree.sync()
     print("✅ comandos globais sincronizados, guilds limpas")
 
+    # atualiza cache de convites
     for guild in bot.guilds:
         await atualizar_convites(guild)
 
+    # inicia loop de mutes
     if not verificar_mutes.is_running():
         verificar_mutes.start()
         print("🔁 loop de mutes iniciado.")
