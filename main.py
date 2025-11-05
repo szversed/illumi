@@ -1,6 +1,6 @@
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
+from discord import app_commands
 import os
 from datetime import datetime, timedelta
 
@@ -13,7 +13,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 antilink_ativo = True
 mutes = {}
 invite_cache = {}
-convites_por_usuario = {}  # {id_inviter: [ids_de_convidados_que_ainda_estão]}
+convites_por_usuario = {}
 
 # -------------------------
 # funções
@@ -43,12 +43,14 @@ async def atualizar_convites(guild: discord.Guild):
 async def on_ready():
     print(f"✅ {bot.user} está online!")
 
-    # sincroniza comandos globais apenas uma vez
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ {len(synced)} comandos sincronizados globalmente.")
-    except Exception as e:
-        print(f"erro ao sincronizar comandos: {e}")
+    # limpa todos os comandos de guild para evitar duplicação
+    for guild in bot.guilds:
+        await bot.tree.clear_commands(guild=guild)
+        await bot.tree.sync(guild=guild)
+
+    # sincroniza apenas comandos globais
+    await bot.tree.sync()
+    print("✅ comandos globais sincronizados, guilds limpas")
 
     for guild in bot.guilds:
         await atualizar_convites(guild)
@@ -126,7 +128,7 @@ async def verificar_mutes():
         del mutes[user_id]
 
 # -------------------------
-# comandos administrativos globais
+# comandos globais
 # -------------------------
 @bot.tree.command(name="menu_admin", description="menu de comandos administrativos.")
 async def menu_admin(interaction: discord.Interaction):
