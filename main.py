@@ -11,15 +11,16 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
-# configurações
+# configs e variáveis
 # -------------------------
 bots_permitidos = []
 antilink_ativo = True
 mutes = {}
-invite_cache = {}  # cache para convites
+invite_cache = {}
+convites_por_usuario = {}  # {id_inviter: [ids_de_convidados_que_ainda_estão]}
 
 # -------------------------
-# funções auxiliares
+# funções
 # -------------------------
 def tem_cargo_soberba(member: discord.Member) -> bool:
     return any(r.name.lower() == "soberba" for r in member.roles)
@@ -47,7 +48,7 @@ async def on_ready():
     print(f"✅ {bot.user} está online e pronto!")
     try:
         synced = await bot.tree.sync(guild=discord.Object(id=1420347024376725526))
-        print(f"✅ {len(synced)} comandos sincronizados com sucesso no servidor 1420347024376725526.")
+        print(f"✅ {len(synced)} comandos sincronizados com sucesso.")
     except Exception as e:
         print(f"erro ao sincronizar comandos: {e}")
 
@@ -55,15 +56,7 @@ async def on_ready():
         await atualizar_convites(guild)
 
     verificar_mutes.start()
-    print("🔁 verificação automática de mutes iniciada.")
-
-@bot.event
-async def on_invite_create(invite):
-    await atualizar_convites(invite.guild)
-
-@bot.event
-async def on_invite_delete(invite):
-    await atualizar_convites(invite.guild)
+    print("🔁 loop de mutes iniciado.")
 
 @bot.event
 async def on_member_join(member):
@@ -89,48 +82,21 @@ async def on_member_join(member):
                 criador = i.inviter
                 break
         if criador:
-            if not hasattr(criador, "convites_usados"):
-                criador.convites_usados = 0
-            criador.convites_usados += 1
+            if criador.id not in convites_por_usuario:
+                convites_por_usuario[criador.id] = []
+            convites_por_usuario[criador.id].append(member.id)
+
     invite_cache[guild.id] = depois
 
-    # ban automático de bots não permitidos
-    if member.bot and member.id not in bots_permitidos:
-        inviter = None
-        try:
-            async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
-                if entry.target.id == member.id:
-                    inviter = entry.user
-                    break
-        except Exception:
-            inviter = None
-
-        try:
-            await guild.ban(member, reason="bot não permitido")
-        except Exception:
-            pass
-
-        canal = discord.utils.get(guild.text_channels, name="confessionário")
-        if not canal and guild.text_channels:
-            canal = guild.text_channels[0]
-
-        if inviter and not inviter.bot:
-            try:
-                await guild.ban(inviter, reason="adicionou bot não permitido")
-            except Exception:
-                pass
-            embed = discord.Embed(
-                title="🚫 bot detectado",
-                description=f"o bot `{member.name}` foi banido e {inviter.mention} também foi banido por adicioná-lo.",
-                color=discord.Color.red()
-            )
-        else:
-            embed = discord.Embed(
-                title="🚫 bot detectado",
-                description=f"o bot `{member.name}` foi banido automaticamente (não permitido).",
-                color=discord.Color.red()
-            )
-        await canal.send(embed=embed)
+@bot.event
+async def on_member_remove(member):
+    # se quem saiu foi convidado, remove da lista de quem convidou
+    for criador_id, lista in list(convites_por_usuario.items()):
+        if member.id in lista:
+            lista.remove(member.id)
+            if not lista:
+                del convites_por_usuario[criador_id]
+            break
 
 @bot.event
 async def on_message(message):
@@ -147,7 +113,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # -------------------------
-# loop de verificação de mutes
+# loop de mutes
 # -------------------------
 @tasks.loop(seconds=30)
 async def verificar_mutes():
@@ -162,83 +128,74 @@ async def verificar_mutes():
                 if role in member.roles:
                     try:
                         await member.remove_roles(role)
-                        print(f"🔊 {member} foi desmutado automaticamente.")
                     except Exception:
                         pass
         del mutes[user_id]
 
 # -------------------------
-# slash commands
+# comandos slash
 # -------------------------
-@bot.tree.command(name="menu_admin", description="mostra o menu de comandos administrativos (só soberba).", guild=discord.Object(id=1420347024376725526))
+@bot.tree.command(name="menu_admin", description="menu de comandos administrativos.", guild=discord.Object(id=1420347024376725526))
 async def menu_admin(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 você não tem permissão.", ephemeral=True)
+        await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
         return
 
     texto = """
 📜 **comandos administrativos:**
 
-🧹 `/clear <quantidade>` → apaga mensagens  
-🔨 `/ban <usuários>` → bane até 5 usuários  
-🔇 `/mute <tempo> <usuários>` → muta por x minutos  
-🚫 `/link <on|off>` → ativa/desativa antilink  
-💬 `/falar <mensagem>` → envia mensagem  
-👥 `/convidados <usuário>` → mostra quantas pessoas entraram pelo link do usuário
+🧹 `/clear <quantidade>`  
+🔨 `/ban <usuários>`  
+🔇 `/mute <tempo> <usuários>`  
+🚫 `/link <on|off>`  
+💬 `/falar <mensagem>`  
+👥 `/convidados <usuário>`
 """
     embed = discord.Embed(title="👑 menu administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="clear", description="apaga mensagens (somente soberba).", guild=discord.Object(id=1420347024376725526))
+@bot.tree.command(name="clear", description="apaga mensagens.", guild=discord.Object(id=1420347024376725526))
 async def clear(interaction: discord.Interaction, quantidade: int):
     if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 permissão negada.", ephemeral=True)
+        await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=quantidade)
     embed = discord.Embed(title="🧹 limpeza concluída", description=f"{len(deleted)} mensagens apagadas.", color=discord.Color.dark_gray())
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="ban", description="bane até 5 usuários (somente soberba).", guild=discord.Object(id=1420347024376725526))
-async def ban(interaction: discord.Interaction, usuario1: discord.Member, usuario2: discord.Member = None, usuario3: discord.Member = None, usuario4: discord.Member = None, usuario5: discord.Member = None):
+@bot.tree.command(name="ban", description="bane usuários.", guild=discord.Object(id=1420347024376725526))
+async def ban(interaction: discord.Interaction, usuario: discord.Member):
     if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 permissão negada.", ephemeral=True)
+        await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
         return
-    usuarios = [u for u in (usuario1, usuario2, usuario3, usuario4, usuario5) if u]
-    nomes = []
-    for user in usuarios:
-        try:
-            await interaction.guild.ban(user, reason=f"banido por {interaction.user}")
-            nomes.append(user.name)
-        except Exception:
-            pass
-    embed = discord.Embed(title="🔨 banimento", description=f"{', '.join(nomes)} foram banidos.", color=discord.Color.red())
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.guild.ban(usuario, reason=f"banido por {interaction.user}")
+        embed = discord.Embed(title="🔨 banido", description=f"{usuario.mention} foi banido.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed)
+    except Exception:
+        await interaction.response.send_message("erro ao banir.", ephemeral=True)
 
-@bot.tree.command(name="mute", description="muta usuários por x minutos (somente soberba).", guild=discord.Object(id=1420347024376725526))
-async def mute(interaction: discord.Interaction, tempo: int, usuario1: discord.Member, usuario2: discord.Member = None, usuario3: discord.Member = None, usuario4: discord.Member = None, usuario5: discord.Member = None):
+@bot.tree.command(name="mute", description="muta usuário por x minutos.", guild=discord.Object(id=1420347024376725526))
+async def mute(interaction: discord.Interaction, tempo: int, usuario: discord.Member):
     if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 permissão negada.", ephemeral=True)
+        await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
         return
     role = await ensure_muted_role(interaction.guild)
-    usuarios = [u for u in (usuario1, usuario2, usuario3, usuario4, usuario5) if u]
-    nomes = []
     fim = datetime.utcnow() + timedelta(minutes=tempo)
-    for user in usuarios:
-        try:
-            await user.add_roles(role)
-            mutes[user.id] = fim
-            nomes.append(user.name)
-        except Exception:
-            pass
-    embed = discord.Embed(title="🔇 usuários mutados", description=f"{', '.join(nomes)} mutados por {tempo} minutos.", color=discord.Color.purple())
-    await interaction.response.send_message(embed=embed)
+    try:
+        await usuario.add_roles(role)
+        mutes[usuario.id] = fim
+        embed = discord.Embed(title="🔇 usuário mutado", description=f"{usuario.mention} mutado por {tempo} minutos.", color=discord.Color.purple())
+        await interaction.response.send_message(embed=embed)
+    except Exception:
+        await interaction.response.send_message("erro ao mutar.", ephemeral=True)
 
-@bot.tree.command(name="link", description="ativa/desativa o antilink (somente soberba).", guild=discord.Object(id=1420347024376725526))
+@bot.tree.command(name="link", description="ativa/desativa o antilink.", guild=discord.Object(id=1420347024376725526))
 async def link(interaction: discord.Interaction, estado: str):
     global antilink_ativo
     if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 permissão negada.", ephemeral=True)
+        await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
         return
     if estado.lower() == "on":
         antilink_ativo = True
@@ -251,31 +208,26 @@ async def link(interaction: discord.Interaction, estado: str):
         return
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="falar", description="faz o bot enviar uma mensagem (somente soberba).", guild=discord.Object(id=1420347024376725526))
+@bot.tree.command(name="falar", description="faz o bot enviar uma mensagem.", guild=discord.Object(id=1420347024376725526))
 async def falar(interaction: discord.Interaction, mensagem: str):
     if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 permissão negada.", ephemeral=True)
+        await interaction.response.send_message("🚫 sem permissão.", ephemeral=True)
         return
     await interaction.response.send_message("✅ mensagem enviada.", ephemeral=True)
     await interaction.channel.send(mensagem)
 
-# -------------------------
-# comando de convidados
-# -------------------------
-@bot.tree.command(name="convidados", description="mostra quantas pessoas entraram pelo convite de um usuário.", guild=discord.Object(id=1420347024376725526))
+@bot.tree.command(name="convidados", description="mostra quantas pessoas o usuário manteve no servidor.", guild=discord.Object(id=1420347024376725526))
 async def convidados(interaction: discord.Interaction, usuario: discord.Member):
-    guild = interaction.guild
-    convites = await guild.invites()
-    total = sum(i.uses for i in convites if i.inviter == usuario)
+    total = len(convites_por_usuario.get(usuario.id, []))
     embed = discord.Embed(
         title="👥 convites",
-        description=f"{usuario.mention} trouxe **{total}** pessoas para o servidor.",
+        description=f"{usuario.mention} trouxe e **manteve {total} pessoas** no servidor.",
         color=discord.Color.blurple()
     )
     await interaction.response.send_message(embed=embed)
 
 # -------------------------
-# run bot
+# execução
 # -------------------------
 if __name__ == "__main__":
     token = os.getenv("TOKEN")
