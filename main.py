@@ -41,13 +41,9 @@ async def on_ready():
     print(f"✅ {bot.user} está online e pronto!")
 
     guild = discord.Object(id=GUILD_ID)
-
-    # evita duplicar: limpa comandos anteriores só desta guild antes de registrar novamente
     try:
-        bot.tree.clear_commands(guild=guild)
-        bot.tree.copy_global_to(guild=guild)
-        await bot.tree.sync(guild=guild)
-        print("✅ comandos sincronizados (sem duplicar).")
+        synced = await bot.tree.sync(guild=guild)
+        print(f"✅ {len(synced)} comandos sincronizados.")
     except Exception as e:
         print(f"erro ao sincronizar comandos: {e}")
 
