@@ -3,6 +3,9 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import os
 from datetime import datetime, timedelta
+from collections import defaultdict, deque
+import time
+import asyncio
 
 intents = discord.Intents.default()
 intents.members = True
@@ -10,17 +13,42 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# -------------------------
+# configurações / estados
+# -------------------------
 antilink_ativo = True
-mutes = {}
+mutes = {}  # user_id -> datetime fim do mute (utc)
 invite_cache = {}
 convites_por_usuario = {}
 
-# -------------------------
-# funções
-# -------------------------
+# flood (ban) config
+FLOOD_LIMIT = 10    # mais de 10 mensagens
+FLOOD_WINDOW = 2.0  # em 2 segundos
+user_msg_times = defaultdict(lambda: deque())
+
+# regra de mensagens duplicadas
+# armazena última mensagem e contador consecutivo por usuário
+last_msg = {}  # user_id -> last message content (str)
+repeat_count = defaultdict(int)  # user_id -> quantas vezes consecutivas da mesma mensagem
+
+# níveis de mute por repetição
+# 0 = sem mute aplicado ainda, 1 = já recebeu 5min, 2 = já recebeu 10min, 3 = já recebeu 20min (aplica 20 novamente se repetir)
+mute_level = defaultdict(int)  # user_id -> nivel
+
+# utilitários para isenção
 def tem_cargo_soberba(member: discord.Member) -> bool:
     return any(r.name.lower() == "soberba" for r in member.roles)
 
+def is_exempt(member: discord.Member) -> bool:
+    if member.bot:
+        return True
+    if tem_cargo_soberba(member):
+        return True
+    return False
+
+# -------------------------
+# funções auxiliares
+# -------------------------
 async def ensure_muted_role(guild: discord.Guild):
     role = discord.utils.get(guild.roles, name="mutado")
     if not role:
@@ -31,6 +59,37 @@ async def ensure_muted_role(guild: discord.Guild):
             except Exception:
                 pass
     return role
+
+async def aplicar_mute(guild: discord.Guild, member: discord.Member, minutos: int, motivo: str = None, canal_log: discord.TextChannel = None):
+    role = await ensure_muted_role(guild)
+    fim = datetime.utcnow() + timedelta(minutes=minutos)
+    try:
+        await member.add_roles(role)
+        mutes[member.id] = fim
+    except Exception:
+        # se não conseguiu aplicar role, tenta notificar canal de mod
+        if canal_log:
+            await canal_log.send(f"⚠️ não foi possível aplicar role mutado em {member.mention}. provavelmente falta permissão.")
+        return
+
+    # mensagem pública curta (tenta enviar)
+    try:
+        razo = f"mutado por {minutos} minutos"
+        if motivo:
+            razo += f" — {motivo}"
+        await member.guild.system_channel.send(f"🔇 {member.mention} {razo}")
+    except Exception:
+        pass
+
+    # log detalhado se canal_log fornecido
+    if canal_log:
+        embed = discord.Embed(
+            title="🔇 mute automático aplicado",
+            description=f"{member.mention} mutado por **{minutos} minutos**.\nmotivo: {motivo or 'repetição/anti-spam'}",
+            color=discord.Color.purple(),
+            timestamp=datetime.utcnow()
+        )
+        await canal_log.send(embed=embed)
 
 async def atualizar_convites(guild: discord.Guild):
     try:
@@ -48,7 +107,7 @@ async def on_ready():
 
     # limpa comandos das guilds e sincroniza
     for guild in bot.guilds:
-        bot.tree.clear_commands(guild=guild)  # sem await
+        bot.tree.clear_commands(guild=guild)
         await bot.tree.sync(guild=guild)
 
     # sincroniza comandos globais
@@ -103,18 +162,8 @@ async def on_member_remove(member):
                 del convites_por_usuario[criador_id]
             break
 
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    if antilink_ativo and ("http://" in message.content or "https://" in message.content):
-        await message.delete()
-        embed = discord.Embed(description=f"🚫 {message.author.mention}, links não são permitidos!", color=discord.Color.red())
-        await message.channel.send(embed=embed, delete_after=5)
-    await bot.process_commands(message)
-
 # -------------------------
-# loop de mutes
+# loop de mutes (libera quando expira)
 # -------------------------
 @tasks.loop(seconds=30)
 async def verificar_mutes():
@@ -133,7 +182,125 @@ async def verificar_mutes():
         del mutes[user_id]
 
 # -------------------------
-# comandos globais
+# on_message integrado (flood + antilink + duplicados)
+# -------------------------
+@bot.event
+async def on_message(message):
+    # ignore bots
+    if message.author.bot:
+        return
+
+    # proteção: processa apenas mensagens em guild (não DMs)
+    if not message.guild:
+        await bot.process_commands(message)
+        return
+
+    member = message.author
+
+    # isenção de cargos/bots
+    if is_exempt(member):
+        await bot.process_commands(message)
+        return
+
+    # --- FLOOD BAN (>10 msgs em 2s) ---
+    now = time.time()
+    dq = user_msg_times[member.id]
+    dq.append(now)
+    # remove timestamps fora da janela
+    while dq and now - dq[0] > FLOOD_WINDOW:
+        dq.popleft()
+
+    if len(dq) > FLOOD_LIMIT:
+        # tenta deletar última msg para limpar chat
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        # tenta banir
+        try:
+            await message.guild.ban(member, reason=f"flood automático: >{FLOOD_LIMIT} msgs em {FLOOD_WINDOW}s")
+            try:
+                await message.channel.send(f"🔨 {member.mention} banido automaticamente por flood.", delete_after=7)
+            except Exception:
+                pass
+        except Exception:
+            # se falhar (perms), tenta avisar canal de mod
+            try:
+                canal = discord.utils.get(message.guild.text_channels, name="mod-logs")
+                if canal:
+                    await canal.send(f"⚠️ tentativa de ban automático falhou para {member.mention}. verifique permissões.")
+            except Exception:
+                pass
+        finally:
+            user_msg_times.pop(member.id, None)
+        return
+
+    # --- antilink (mantive comportamento anterior) ---
+    if antilink_ativo and ("http://" in message.content or "https://" in message.content):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        embed = discord.Embed(description=f"🚫 {message.author.mention}, links não são permitidos!", color=discord.Color.red())
+        try:
+            await message.channel.send(embed=embed, delete_after=5)
+        except Exception:
+            pass
+        return
+
+    # --- detecção de mensagens duplicadas consecutivas ---
+    # normaliza conteúdo (pode ajustar normalização se quiser ignorar espaços/maiusculas)
+    conteudo = message.content.strip()
+    prev = last_msg.get(member.id)
+
+    if prev is not None and conteudo != "":
+        if conteudo == prev:
+            repeat_count[member.id] += 1
+        else:
+            repeat_count[member.id] = 1
+            last_msg[member.id] = conteudo
+    else:
+        # primeira mensagem ou sem prev
+        repeat_count[member.id] = 1
+        last_msg[member.id] = conteudo
+
+    # se chegou a 5 repetições consecutivas -> aplicar mute conforme nivel
+    if repeat_count[member.id] >= 5:
+        nivel = mute_level.get(member.id, 0)
+        minutos = 5
+        if nivel == 0:
+            minutos = 5
+            mute_level[member.id] = 1
+        elif nivel == 1:
+            minutos = 10
+            mute_level[member.id] = 2
+        else:
+            # nivel >=2 -> aplica 20 minutos (mantém no nivel 3)
+            minutos = 20
+            mute_level[member.id] = max(nivel, 3)
+
+        # tenta deletar a mensagem que causou o disparo
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        # aplica mute e loga
+        canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
+        motivo = f"repetição de mensagem ({repeat_count[member.id]}x) - nível {mute_level[member.id]}"
+        await aplicar_mute(message.guild, member, minutos, motivo=motivo, canal_log=canal_log)
+
+        # reseta contador de repetição para evitar múltiplos disparos imediatos
+        repeat_count[member.id] = 0
+        last_msg[member.id] = None
+
+        return
+
+    # -- processa comandos finalmente --
+    await bot.process_commands(message)
+
+# -------------------------
+# comandos globais (manteve os seus)
 # -------------------------
 @bot.tree.command(name="menu_admin", description="menu de comandos administrativos.")
 async def menu_admin(interaction: discord.Interaction):
