@@ -22,7 +22,7 @@ invite_cache = {}
 convites_por_usuario = {}
 
 # flood (ban) mensagens diferentes
-FLOOD_LIMIT = 15
+FLOOD_LIMIT = 10
 FLOOD_WINDOW = 10.0  # 10 segundos
 user_msg_times = defaultdict(lambda: deque())
 
