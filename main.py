@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 import time
+import re
 import asyncio
 
 intents = discord.Intents.default()
@@ -23,19 +24,17 @@ convites_por_usuario = {}
 
 # flood (ban) config
 FLOOD_LIMIT = 10    # mais de 10 mensagens
-FLOOD_WINDOW = 2.0  # em 2 segundos
+FLOOD_WINDOW = 3.0  # em 3 segundos
 user_msg_times = defaultdict(lambda: deque())
 
 # regra de mensagens duplicadas
-# armazena última mensagem e contador consecutivo por usuário
 last_msg = {}  # user_id -> last message content (str)
 repeat_count = defaultdict(int)  # user_id -> quantas vezes consecutivas da mesma mensagem
+mute_level = defaultdict(int)  # user_id -> nível de mute (0,1,2,3)
 
-# níveis de mute por repetição
-# 0 = sem mute aplicado ainda, 1 = já recebeu 5min, 2 = já recebeu 10min, 3 = já recebeu 20min (aplica 20 novamente se repetir)
-mute_level = defaultdict(int)  # user_id -> nivel
-
-# utilitários para isenção
+# -------------------------
+# utilitários
+# -------------------------
 def tem_cargo_soberba(member: discord.Member) -> bool:
     return any(r.name.lower() == "soberba" for r in member.roles)
 
@@ -45,6 +44,18 @@ def is_exempt(member: discord.Member) -> bool:
     if tem_cargo_soberba(member):
         return True
     return False
+
+def normalize_message(msg: str) -> str:
+    """
+    normaliza mensagem para comparar repetições:
+    - remove espaços extras
+    - transforma em lowercase
+    - remove pontuação básica
+    """
+    msg = msg.strip().lower()
+    msg = re.sub(r'\s+', ' ', msg)  # espaços múltiplos -> 1
+    msg = re.sub(r'[.,!?;:]', '', msg)  # remove pontuação simples
+    return msg
 
 # -------------------------
 # funções auxiliares
@@ -67,12 +78,10 @@ async def aplicar_mute(guild: discord.Guild, member: discord.Member, minutos: in
         await member.add_roles(role)
         mutes[member.id] = fim
     except Exception:
-        # se não conseguiu aplicar role, tenta notificar canal de mod
         if canal_log:
             await canal_log.send(f"⚠️ não foi possível aplicar role mutado em {member.mention}. provavelmente falta permissão.")
         return
 
-    # mensagem pública curta (tenta enviar)
     try:
         razo = f"mutado por {minutos} minutos"
         if motivo:
@@ -81,7 +90,6 @@ async def aplicar_mute(guild: discord.Guild, member: discord.Member, minutos: in
     except Exception:
         pass
 
-    # log detalhado se canal_log fornecido
     if canal_log:
         embed = discord.Embed(
             title="🔇 mute automático aplicado",
@@ -105,20 +113,16 @@ async def atualizar_convites(guild: discord.Guild):
 async def on_ready():
     print(f"✅ {bot.user} está online!")
 
-    # limpa comandos das guilds e sincroniza
     for guild in bot.guilds:
         bot.tree.clear_commands(guild=guild)
         await bot.tree.sync(guild=guild)
 
-    # sincroniza comandos globais
     await bot.tree.sync()
     print("✅ comandos globais sincronizados, guilds limpas")
 
-    # atualiza cache de convites
     for guild in bot.guilds:
         await atualizar_convites(guild)
 
-    # inicia loop de mutes
     if not verificar_mutes.is_running():
         verificar_mutes.start()
         print("🔁 loop de mutes iniciado.")
@@ -163,7 +167,7 @@ async def on_member_remove(member):
             break
 
 # -------------------------
-# loop de mutes (libera quando expira)
+# loop de mutes
 # -------------------------
 @tasks.loop(seconds=30)
 async def verificar_mutes():
@@ -182,49 +186,45 @@ async def verificar_mutes():
         del mutes[user_id]
 
 # -------------------------
-# on_message integrado (flood + antilink + duplicados)
+# on_message integrado
 # -------------------------
 @bot.event
 async def on_message(message):
-    # ignore bots
     if message.author.bot:
         return
 
-    # proteção: processa apenas mensagens em guild (não DMs)
     if not message.guild:
         await bot.process_commands(message)
         return
 
     member = message.author
 
-    # isenção de cargos/bots
     if is_exempt(member):
         await bot.process_commands(message)
         return
 
-    # --- FLOOD BAN (>10 msgs em 2s) ---
     now = time.time()
     dq = user_msg_times[member.id]
     dq.append(now)
-    # remove timestamps fora da janela
     while dq and now - dq[0] > FLOOD_WINDOW:
         dq.popleft()
 
     if len(dq) > FLOOD_LIMIT:
-        # tenta deletar última msg para limpar chat
+        # apaga todas as mensagens recentes do flood
         try:
-            await message.delete()
+            def check(m):
+                return m.author.id == member.id and (now - m.created_at.timestamp()) <= FLOOD_WINDOW
+            deleted = await message.channel.purge(limit=100, check=check)
         except Exception:
-            pass
-        # tenta banir
+            deleted = []
+
         try:
             await message.guild.ban(member, reason=f"flood automático: >{FLOOD_LIMIT} msgs em {FLOOD_WINDOW}s")
             try:
-                await message.channel.send(f"🔨 {member.mention} banido automaticamente por flood.", delete_after=7)
+                await message.channel.send(f"🔨 {member.mention} banido automaticamente por flood. {len(deleted)} mensagens deletadas.", delete_after=7)
             except Exception:
                 pass
         except Exception:
-            # se falhar (perms), tenta avisar canal de mod
             try:
                 canal = discord.utils.get(message.guild.text_channels, name="mod-logs")
                 if canal:
@@ -235,7 +235,6 @@ async def on_message(message):
             user_msg_times.pop(member.id, None)
         return
 
-    # --- antilink (mantive comportamento anterior) ---
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
         try:
             await message.delete()
@@ -248,9 +247,7 @@ async def on_message(message):
             pass
         return
 
-    # --- detecção de mensagens duplicadas consecutivas ---
-    # normaliza conteúdo (pode ajustar normalização se quiser ignorar espaços/maiusculas)
-    conteudo = message.content.strip()
+    conteudo = normalize_message(message.content)
     prev = last_msg.get(member.id)
 
     if prev is not None and conteudo != "":
@@ -260,11 +257,9 @@ async def on_message(message):
             repeat_count[member.id] = 1
             last_msg[member.id] = conteudo
     else:
-        # primeira mensagem ou sem prev
         repeat_count[member.id] = 1
         last_msg[member.id] = conteudo
 
-    # se chegou a 5 repetições consecutivas -> aplicar mute conforme nivel
     if repeat_count[member.id] >= 5:
         nivel = mute_level.get(member.id, 0)
         minutos = 5
@@ -275,32 +270,26 @@ async def on_message(message):
             minutos = 10
             mute_level[member.id] = 2
         else:
-            # nivel >=2 -> aplica 20 minutos (mantém no nivel 3)
             minutos = 20
             mute_level[member.id] = max(nivel, 3)
 
-        # tenta deletar a mensagem que causou o disparo
         try:
             await message.delete()
         except Exception:
             pass
 
-        # aplica mute e loga
         canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
         motivo = f"repetição de mensagem ({repeat_count[member.id]}x) - nível {mute_level[member.id]}"
         await aplicar_mute(message.guild, member, minutos, motivo=motivo, canal_log=canal_log)
 
-        # reseta contador de repetição para evitar múltiplos disparos imediatos
         repeat_count[member.id] = 0
         last_msg[member.id] = None
-
         return
 
-    # -- processa comandos finalmente --
     await bot.process_commands(message)
 
 # -------------------------
-# comandos globais (manteve os seus)
+# comandos globais
 # -------------------------
 @bot.tree.command(name="menu_admin", description="menu de comandos administrativos.")
 async def menu_admin(interaction: discord.Interaction):
