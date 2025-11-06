@@ -1,4 +1,4 @@
-# bot_pecadores_complete.py
+# arquivo: bot_pecadores_final.py
 # requer: discord.py 2.6+ (python 3.9+)
 # defina: export TOKEN="seu_token_aqui"
 
@@ -28,7 +28,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # -------------------------
 # arquivos / constantes
 # -------------------------
-BLOQUEIOS_FILE = "bloqueios.json"
+# removido bloqueio permanente por pedido; usamos cooldowns temporários
+PAIR_COOLDOWNS = {}  # frozenset({u1,u2}) -> timestamp (seconds) until they can't re-pair
+PAIR_COOLDOWN_SECONDS = 3 * 60  # 3 minutos
+CHANNEL_DURATION = 7 * 60  # 7 minutos
 
 # -------------------------
 # estados / estruturas
@@ -49,11 +52,10 @@ repeat_count = defaultdict(int)
 mute_level = defaultdict(int)
 user_repeat_msgs = defaultdict(list)
 
-# fila e bloqueios e ativos
+# fila e ativos
 fila_carentes = []            # lista de user ids na fila (ordem)
-bloqueios = defaultdict(set)  # user_id -> set(user_id bloqueados)
-active_users = set()          # user ids em conversa (não podem entrar na fila)
-active_channels = {}          # channel_id -> (user1_id, user2_id)
+active_users = set()          # user ids que estão em um canal criado (pendente ou ativo)
+active_channels = {}          # channel_id -> dict {u1,u2,message_id,accepted_set,created_at}
 
 # templates de nome estilo seven
 NOME_TEMPLATES = [
@@ -65,37 +67,6 @@ NOME_TEMPLATES = [
     "investiga-{}-{}",
     "sins-{}-{}",
 ]
-
-# -------------------------
-# persistência bloqueios
-# -------------------------
-def carregar_bloqueios():
-    global bloqueios
-    if os.path.exists(BLOQUEIOS_FILE):
-        try:
-            with open(BLOQUEIOS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                loaded = defaultdict(set)
-                for k, v in data.items():
-                    try:
-                        loaded[int(k)] = set(int(x) for x in v)
-                    except Exception:
-                        loaded[int(k)] = set(v)
-                bloqueios = loaded
-        except Exception:
-            print("⚠️ falha ao carregar bloqueios.json, começando vazio")
-            bloqueios = defaultdict(set)
-    else:
-        bloqueios = defaultdict(set)
-
-def salvar_bloqueios():
-    try:
-        with open(BLOQUEIOS_FILE, "w", encoding="utf-8") as f:
-            json.dump({str(k): list(v) for k, v in bloqueios.items()}, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("⚠️ erro ao salvar bloqueios:", e)
-
-carregar_bloqueios()
 
 # -------------------------
 # utilitários
@@ -113,6 +84,20 @@ def sanitize_name(name: str, max_len=8) -> str:
     s = re.sub(r'[^a-zA-Z0-9\-]', '', name)
     s = s[:max_len].lower() or "u"
     return s
+
+def pair_key(u1_id: int, u2_id: int):
+    return frozenset({u1_id, u2_id})
+
+def can_pair(u1_id: int, u2_id: int) -> bool:
+    key = pair_key(u1_id, u2_id)
+    ts = PAIR_COOLDOWNS.get(key)
+    if not ts:
+        return True
+    return time.time() >= ts
+
+def set_pair_cooldown(u1_id: int, u2_id: int):
+    key = pair_key(u1_id, u2_id)
+    PAIR_COOLDOWNS[key] = time.time() + PAIR_COOLDOWN_SECONDS
 
 async def ensure_muted_role(guild: discord.Guild):
     role = discord.utils.get(guild.roles, name="mutado")
@@ -158,8 +143,10 @@ async def aplicar_mute(guild: discord.Guild, member: discord.Member, minutos: in
 async def encerrar_canal_e_cleanup(canal: discord.abc.GuildChannel):
     try:
         cid = canal.id
-        if cid in active_channels:
-            u1, u2 = active_channels.get(cid, (None, None))
+        data = active_channels.get(cid)
+        if data:
+            u1 = data.get("u1")
+            u2 = data.get("u2")
             if u1:
                 active_users.discard(u1)
             if u2:
@@ -186,14 +173,14 @@ async def atualizar_convites_safe(guild: discord.Guild):
         invite_cache[guild.id] = {}
 
 # -------------------------
-# views: leave, conversa, encerrar
+# views: leave, ticket, conversation buttons
 # -------------------------
 class LeaveQueueView(discord.ui.View):
     def __init__(self, user_id):
         super().__init__(timeout=None)
         self.user_id = user_id
 
-    @discord.ui.button(label="sair da fila", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="sair da fila", style=discord.ButtonStyle.danger, custom_id=None)
     async def sair(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("isso é só pra você.", ephemeral=True)
@@ -213,102 +200,285 @@ class LeaveQueueView(discord.ui.View):
         except Exception:
             pass
 
-class ConversaView(discord.ui.View):
-    def __init__(self, canal: discord.TextChannel, user1: discord.Member, user2: discord.Member):
+class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="entrar na fila 💘", style=discord.ButtonStyle.primary, custom_id="ticket_entrar")
+    async def entrar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        guild = interaction.guild
+
+        if user.id in active_users:
+            await interaction.response.send_message("😅 você já está em um chat ativo.", ephemeral=True)
+            return
+
+        if user.id in fila_carentes:
+            await interaction.response.send_message("❗ você já está na fila.", ephemeral=True)
+            return
+
+        fila_carentes.append(user.id)
+        view_leave = LeaveQueueView(user.id)
+        await interaction.response.send_message("💘 você entrou na fila. (apenas você vê esta mensagem)", ephemeral=True, view=view_leave)
+
+        await tentar_formar_dupla(guild)
+
+class ConversationView(discord.ui.View):
+    def __init__(self, canal: discord.TextChannel, u1: discord.Member, u2: discord.Member, message_id: int):
         super().__init__(timeout=None)
         self.canal = canal
-        self.user1 = user1
-        self.user2 = user2
-        self._encerrado = False
+        self.u1 = u1
+        self.u2 = u2
+        self.message_id = message_id
 
-    @discord.ui.button(label="aceitar conversa", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="aceitar 💞", style=discord.ButtonStyle.success, custom_id="conv_aceitar")
     async def aceitar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id not in {self.user1.id, self.user2.id}:
+        uid = interaction.user.id
+        cid = self.canal.id
+        if uid not in (self.u1.id, self.u2.id):
             await interaction.response.send_message("você não pode interagir aqui.", ephemeral=True)
             return
 
+        data = active_channels.get(cid)
+        if not data:
+            await interaction.response.send_message("estado inválido.", ephemeral=True)
+            return
+
+        accepted = data.setdefault("accepted", set())
+        accepted.add(uid)
+        # edit embed to show status (same message)
         try:
-            await self.canal.send(
-                f"{self.user1.mention} e {self.user2.mention}, conversa aceita!\n"
-                "o canal será encerrado automaticamente em 10 minutos. "
-                "vocês também podem usar o botão 'encerrar conversa' para finalizar antes.\n"
-                "⚠️ se você bloquear a outra pessoa, ela não aparecerá mais na sua fila no futuro."
+            msg = await self.canal.fetch_message(self.message_id)
+            embed = discord.Embed(
+                title="pecadores — status",
+                description=f"{self.u1.mention} {'✅' if self.u1.id in accepted else '❌'}\n{self.u2.mention} {'✅' if self.u2.id in accepted else '❌'}\n\naguardando ambos aceitarem..." ,
+                color=discord.Color.purple()
             )
+            await msg.edit(embed=embed, view=self)
         except Exception:
             pass
 
-        # substitui os botões por encerrar
-        self.clear_items()
-        enc_view = EncerrarView(self.canal, self.user1, self.user2)
-        self.add_item(enc_view.encerrar_button)
-        try:
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
+        # if both accepted -> enable sending
+        if self.u1.id in accepted and self.u2.id in accepted:
+            # allow send_messages
+            try:
+                await self.canal.set_permissions(self.u1, send_messages=True, view_channel=True)
+                await self.canal.set_permissions(self.u2, send_messages=True, view_channel=True)
+            except Exception:
+                pass
 
-        # inicia timer de 10 minutos
-        asyncio.create_task(self._encerrar_apos_tempo(600))
-        await interaction.response.send_message("conversa iniciada — ok!", ephemeral=True)
+            # replace view with EncerrarView (single button) and edit embed to show started
+            enc_view = EncerrarView(self.canal, self.u1, self.u2)
+            try:
+                msg = await self.canal.fetch_message(self.message_id)
+                embed = discord.Embed(
+                    title="conversa iniciada — pecadores",
+                    description=f"{self.u1.mention} e {self.u2.mention} — a conversa foi liberada. vocês têm 7 minutos. clique em **encerrar** para fechar agora.",
+                    color=discord.Color.green()
+                )
+                await msg.edit(embed=embed, view=enc_view)
+            except Exception:
+                pass
 
-    @discord.ui.button(label="bloquear carente", style=discord.ButtonStyle.danger)
-    async def bloquear(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id not in {self.user1.id, self.user2.id}:
-            await interaction.response.send_message("você não pode interagir aqui.", ephemeral=True)
-            return
+            # start 7 minute timer
+            active_channels[cid]["started_at"] = time.time()
+            active_channels[cid]["accepted"] = set([self.u1.id, self.u2.id])
+            asyncio.create_task(_auto_close_channel_after(canal=self.canal, segundos=CHANNEL_DURATION))
 
-        outro = self.user2 if interaction.user.id == self.user1.id else self.user1
-        bloqueios[interaction.user.id].add(outro.id)
-        salvar_bloqueios()
-        try:
-            await self.canal.send(f"{outro.mention} foi bloqueado por {interaction.user.mention}.")
-        except Exception:
-            pass
-        await interaction.response.send_message("usuário bloqueado e não aparecerá mais na sua fila.", ephemeral=True)
-        await encerrar_canal_e_cleanup(self.canal)
+        await interaction.response.send_message("sua resposta foi registrada (apenas você vê).", ephemeral=True)
 
-    @discord.ui.button(label="não aceitar conversa", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="recusar 💔", style=discord.ButtonStyle.danger, custom_id="conv_recusar")
     async def recusar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id not in {self.user1.id, self.user2.id}:
+        uid = interaction.user.id
+        cid = self.canal.id
+        if uid not in (self.u1.id, self.u2.id):
             await interaction.response.send_message("você não pode interagir aqui.", ephemeral=True)
             return
 
+        # apply pair cooldown
+        set_pair_cooldown(self.u1.id, self.u2.id)
+
+        # inform via editing same message then delete channel
         try:
-            await self.canal.send("conversa recusada. voltando para a fila (se aplicável).")
+            msg = await self.canal.fetch_message(self.message_id)
+            embed = discord.Embed(
+                title="conversa recusada",
+                description=f"{interaction.user.mention} recusou a conversa. o canal será encerrado e vocês poderão tentar novamente depois de 3 minutos.",
+                color=discord.Color.dark_red()
+            )
+            await msg.edit(embed=embed, view=None)
         except Exception:
             pass
 
-        # volta para fila apenas se não estiver bloqueado pelo outro e não estiver ativo
-        if self.user1.id not in bloqueios.get(self.user2.id, set()) and self.user1.id not in active_users:
-            fila_carentes.append(self.user1.id)
-        if self.user2.id not in bloqueios.get(self.user1.id, set()) and self.user2.id not in active_users:
-            fila_carentes.append(self.user2.id)
-
-        await interaction.response.send_message("vocês foram recolocados na fila (se não bloqueados).", ephemeral=True)
+        # cleanup
+        await asyncio.sleep(1)  # pequeno delay para que a edição seja vista
         await encerrar_canal_e_cleanup(self.canal)
-
-    async def _encerrar_apos_tempo(self, segundos: int):
-        await asyncio.sleep(segundos)
-        if not self._encerrado:
-            await encerrar_canal_e_cleanup(self.canal)
-            self._encerrado = True
+        await interaction.response.send_message("você recusou a conversa (apenas você vê).", ephemeral=True)
 
 class EncerrarView(discord.ui.View):
-    def __init__(self, canal: discord.TextChannel, user1: discord.Member, user2: discord.Member):
+    def __init__(self, canal: discord.TextChannel, u1: discord.Member, u2: discord.Member):
         super().__init__(timeout=None)
         self.canal = canal
-        self.user1 = user1
-        self.user2 = user2
+        self.u1 = u1
+        self.u2 = u2
 
-    @discord.ui.button(label="encerrar conversa", style=discord.ButtonStyle.danger)
-    async def encerrar_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id not in {self.user1.id, self.user2.id}:
+    @discord.ui.button(label="encerrar agora", style=discord.ButtonStyle.danger, custom_id="encerrar_agora")
+    async def encerrar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in (self.u1.id, self.u2.id):
             await interaction.response.send_message("você não pode encerrar.", ephemeral=True)
             return
-        await encerrar_canal_e_cleanup(self.canal)
         try:
-            await interaction.response.send_message("canal encerrado!", ephemeral=True)
+            msg = await self.canal.history(limit=1).next()
+        except Exception:
+            msg = None
+        await encerrar_canal_e_cleanup(self.canal)
+        await interaction.response.send_message("canal encerrado.", ephemeral=True)
+
+# -------------------------
+# tentativa de formar dupla
+# -------------------------
+async def tentar_formar_dupla(guild: discord.Guild):
+    # precisa de pelo menos 2
+    if len(fila_carentes) < 2:
+        return
+
+    # procura duas pessoas não bloqueadas por cooldown e não ativas
+    for i in range(len(fila_carentes)):
+        for j in range(i + 1, len(fila_carentes)):
+            u1_id = fila_carentes[i]
+            u2_id = fila_carentes[j]
+            if u1_id in active_users or u2_id in active_users:
+                continue
+            if not can_pair(u1_id, u2_id):
+                continue
+
+            # remove ambos da fila (se ainda lá)
+            try:
+                fila_carentes.remove(u1_id)
+            except ValueError:
+                pass
+            try:
+                fila_carentes.remove(u2_id)
+            except ValueError:
+                pass
+
+            u1 = guild.get_member(u1_id)
+            u2 = guild.get_member(u2_id)
+            if not u1 or not u2:
+                # se alguém saiu do servidor, continue procurando
+                continue
+
+            # cria nome de canal com template seven-style
+            clean1 = sanitize_name(u1.name, max_len=8)
+            clean2 = sanitize_name(u2.name, max_len=8)
+            template = random.choice(NOME_TEMPLATES)
+            nome_canal = template.format(clean1, clean2)
+            existing = discord.utils.get(guild.text_channels, name=nome_canal)
+            suffix = 1
+            while existing:
+                nome_canal = f"{template.format(clean1, clean2)}-{suffix}"
+                existing = discord.utils.get(guild.text_channels, name=nome_canal)
+                suffix += 1
+
+            # overwrites só pros dois e bot; inicialmente bloqueia envio (send_messages=False)
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                u1: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+                u2: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+            }
+
+            try:
+                canal = await guild.create_text_channel(nome_canal, overwrites=overwrites, reason="canal pecadores temporário")
+            except Exception:
+                # se falhar na criação, retorna ambos para fila (safety)
+                fila_carentes.append(u1_id)
+                fila_carentes.append(u2_id)
+                return
+
+            # marca como ativos (impede entrar novamente na fila)
+            active_users.add(u1_id)
+            active_users.add(u2_id)
+            active_channels[canal.id] = {
+                "u1": u1_id,
+                "u2": u2_id,
+                "accepted": set(),
+                "message_id": None,
+                "created_at": time.time()
+            }
+
+            # envia uma única mensagem embed no canal (será editada ao longo do fluxo)
+            embed = discord.Embed(
+                title="pecadores — confirmação",
+                description=f"{u1.mention} & {u2.mention}\n\naguardando confirmação: ambos têm que aceitar para poderem conversar.\n\nbotões abaixo para aceitar ou recusar. ninguém poderá enviar mensagens até os dois aceitarem.",
+                color=discord.Color.purple()
+            )
+            view = ConversationView(canal, u1, u2, message_id=0)
+            try:
+                msg = await canal.send(embed=embed, view=view)
+                # store message_id and set view.message_id
+                active_channels[canal.id]["message_id"] = msg.id
+                view.message_id = msg.id
+            except Exception:
+                # se falhar, cleanup e retorna à fila
+                await encerrar_canal_e_cleanup(canal)
+                fila_carentes.append(u1_id)
+                fila_carentes.append(u2_id)
+                return
+
+            # safety close if nobody interacts in longer time (30m)
+            asyncio.create_task(_safety_close_if_no_interaction(canal, timeout=60*30))
+            return
+
+# safety: fecha canal se ninguém interagiu em X tempo
+async def _safety_close_if_no_interaction(canal: discord.TextChannel, timeout: int = 1800):
+    await asyncio.sleep(timeout)
+    data = active_channels.get(canal.id)
+    if not data:
+        return
+    # if accepted empty, or not started, close and cleanup
+    if not data.get("accepted"):
+        try:
+            # edit message to notify
+            try:
+                msg = await canal.fetch_message(data["message_id"])
+                embed = discord.Embed(
+                    title="canal encerrado (inatividade)",
+                    description="ninguém aceitou a conversa a tempo — canal encerrado.",
+                    color=discord.Color.dark_gray()
+                )
+                await msg.edit(embed=embed, view=None)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+            await encerrar_canal_e_cleanup(canal)
         except Exception:
             pass
+
+# auto close after accepted started
+async def _auto_close_channel_after(canal: discord.TextChannel, segundos: int):
+    await asyncio.sleep(segundos)
+    if canal.id not in active_channels:
+        return
+    # close and cleanup
+    try:
+        data = active_channels.get(canal.id)
+        if data:
+            # edit final message to indicate timeout
+            try:
+                msg = await canal.fetch_message(data["message_id"])
+                embed = discord.Embed(
+                    title="tempo esgotado",
+                    description="seu tempo de conversa de 7 minutos terminou. canal encerrado.",
+                    color=discord.Color.dark_gray()
+                )
+                await msg.edit(embed=embed, view=None)
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+        await encerrar_canal_e_cleanup(canal)
+    except Exception:
+        pass
 
 # -------------------------
 # eventos principais
@@ -316,7 +486,6 @@ class EncerrarView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online!")
-    carregar_bloqueios()
     for guild in bot.guilds:
         try:
             bot.tree.clear_commands(guild=guild)
@@ -566,12 +735,6 @@ async def falar(interaction: discord.Interaction, mensagem: str):
         pass
 
 # -------------------------
-# helper: esta bloqueado
-# -------------------------
-def esta_bloqueado(u1_id, u2_id):
-    return u2_id in bloqueios.get(u1_id, set()) or u1_id in bloqueios.get(u2_id, set())
-
-# -------------------------
 # comando /setupcarente (centro de tickets)
 # -------------------------
 @bot.tree.command(name="setupcarente", description="configura o sistema de carentes (admin)")
@@ -593,138 +756,6 @@ async def setupcarente(interaction: discord.Interaction):
         await interaction.response.send_message("erro ao enviar a mensagem de setup.", ephemeral=True)
 
 # -------------------------
-# ticket view (botão público que users clicam)
-# -------------------------
-class TicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="entrar na fila 💘", style=discord.ButtonStyle.primary, custom_id="ticket_entrar")
-    async def entrar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-        guild = interaction.guild
-
-        # impede se já ativo
-        if user.id in active_users:
-            await interaction.response.send_message("😅 você já está em uma conversa ativa.", ephemeral=True)
-            return
-
-        # impede se já na fila
-        if user.id in fila_carentes:
-            await interaction.response.send_message("❗ você já está na fila.", ephemeral=True)
-            return
-
-        # adiciona à fila
-        fila_carentes.append(user.id)
-        view_leave = LeaveQueueView(user.id)
-        await interaction.response.send_message("💘 você entrou na fila. (apenas você vê esta mensagem)", ephemeral=True, view=view_leave)
-
-        # tenta parear
-        await tentar_formar_dupla(guild)
-
-# -------------------------
-# tentativa de formar dupla
-# -------------------------
-async def tentar_formar_dupla(guild: discord.Guild):
-    # precisa de pelo menos 2
-    if len(fila_carentes) < 2:
-        return
-
-    # procura duas pessoas não bloqueadas e não ativas
-    for i in range(len(fila_carentes)):
-        for j in range(i + 1, len(fila_carentes)):
-            u1_id = fila_carentes[i]
-            u2_id = fila_carentes[j]
-            if u1_id in active_users or u2_id in active_users:
-                continue
-            if esta_bloqueado(u1_id, u2_id):
-                continue
-
-            # remove ambos da fila (se ainda lá)
-            try:
-                fila_carentes.remove(u1_id)
-            except ValueError:
-                pass
-            try:
-                fila_carentes.remove(u2_id)
-            except ValueError:
-                pass
-
-            u1 = guild.get_member(u1_id)
-            u2 = guild.get_member(u2_id)
-            if not u1 or not u2:
-                # se alguém saiu do servidor, continue procurando
-                continue
-
-            # cria nome de canal com template seven-style
-            clean1 = sanitize_name(u1.name, max_len=8)
-            clean2 = sanitize_name(u2.name, max_len=8)
-            template = random.choice(NOME_TEMPLATES)
-            nome_canal = template.format(clean1, clean2)
-            existing = discord.utils.get(guild.text_channels, name=nome_canal)
-            suffix = 1
-            while existing:
-                nome_canal = f"{template.format(clean1, clean2)}-{suffix}"
-                existing = discord.utils.get(guild.text_channels, name=nome_canal)
-                suffix += 1
-
-            # overwrites só pros dois e bot
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                u1: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                u2: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            }
-
-            # tenta manter categoria do canal onde o ticket foi clicado (não temos contexto direto aqui),
-            # cria sem category
-            try:
-                canal = await guild.create_text_channel(nome_canal, overwrites=overwrites, reason="canal pecadores temporário")
-            except Exception:
-                # fallback para usar guild system channel
-                try:
-                    canal = await guild.create_text_channel(nome_canal, overwrites=overwrites)
-                except Exception:
-                    # se falhar, não crie e retorne os usuários à fila
-                    fila_carentes.append(u1_id)
-                    fila_carentes.append(u2_id)
-                    return
-
-            # marca como ativos
-            active_users.add(u1_id)
-            active_users.add(u2_id)
-            active_channels[canal.id] = (u1_id, u2_id)
-
-            embed = discord.Embed(
-                title="nova conversa de carentes — pecadores",
-                description=f"{u1.mention} e {u2.mention}, vocês foram pareados. aceitem ou recusem a conversa abaixo.",
-                color=discord.Color.dark_purple()
-            )
-            view = ConversaView(canal, u1, u2)
-            try:
-                await canal.send(embed=embed, view=view)
-            except Exception:
-                try:
-                    # se não conseguir enviar no canal (permissões), fallback: enviar DM ephemeral ao iniciador
-                    pass
-                except Exception:
-                    pass
-
-            # inicia timer para auto-encerrar (caso ninguém aceite) — o encerramento só ocorre após aceitar -> timer é iniciado dentro do aceitar
-            # porém garante que, se ninguém interagir em X tempo, o canal seja fechado (safety)
-            asyncio.create_task(_safety_close_if_no_interaction(canal, timeout=60*30))  # 30 min safety
-            return
-
-# safety: fecha canal se ninguém interagiu em X tempo
-async def _safety_close_if_no_interaction(canal: discord.TextChannel, timeout: int = 1800):
-    await asyncio.sleep(timeout)
-    if canal.id not in active_channels:
-        # canal já foi limpo
-        return
-    # se ainda está ativo e ninguém clicou (voce poderia checar mensagens), simplesmente fecha e libera usuários
-    await encerrar_canal_e_cleanup(canal)
-
-# -------------------------
 # evento: canal deletado -> cleanup active users
 # -------------------------
 @bot.event
@@ -733,7 +764,9 @@ async def on_guild_channel_delete(channel):
         return
     cid = channel.id
     if cid in active_channels:
-        u1, u2 = active_channels.get(cid, (None, None))
+        data = active_channels.get(cid, {})
+        u1 = data.get("u1")
+        u2 = data.get("u2")
         if u1:
             active_users.discard(u1)
         if u2:
