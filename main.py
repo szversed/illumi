@@ -1,3 +1,8 @@
+# bot_carencia.py
+# código completo integrado
+# requisitos: discord.py 2.x
+# defina a variável de ambiente TOKEN antes de rodar
+
 import os
 import re
 import json
@@ -18,7 +23,6 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.guilds = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
@@ -59,6 +63,9 @@ blocked_nick = {}  # user_id -> nick (None means allowed again)
 
 # nome base para canais (será numerado: pecadores, pecadores-1, pecadores-2...)
 CHANNEL_BASE = "pecadores"
+
+# mapping guild.id -> setup channel id (onde /setupcarente foi usado)
+SETUP_CHANNELS = {}
 
 # -------------------------
 # utilitários
@@ -402,6 +409,7 @@ async def tentar_formar_dupla(guild: discord.Guild):
             u1 = guild.get_member(u1_id)
             u2 = guild.get_member(u2_id)
             if not u1 or not u2:
+                # se não existirem mais (sairam do servidor), continua
                 continue
 
             # gera nome "pecadores", "pecadores-1", ...
@@ -457,6 +465,16 @@ async def tentar_formar_dupla(guild: discord.Guild):
                 fila_carentes.append(u1_id)
                 fila_carentes.append(u2_id)
                 return
+
+            # novo: avisa no canal onde o /setupcarente foi usado (se configurado)
+            setup_channel_id = SETUP_CHANNELS.get(guild.id)
+            if setup_channel_id:
+                try:
+                    setup_channel = guild.get_channel(setup_channel_id)
+                    if setup_channel:
+                        await setup_channel.send(f"💞 **par encontrado!** {u1.mention} e {u2.mention} foram levados para {canal.mention}")
+                except Exception:
+                    pass
 
             # iniciar timer de accept timeout (1 minuto)
             asyncio.create_task(_accept_timeout_handler(canal, timeout=ACCEPT_TIMEOUT))
@@ -790,7 +808,6 @@ async def link(interaction: discord.Interaction, estado: str):
         return
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name="falar", description="bot envia mensagem")
 async def falar(interaction: discord.Interaction, mensagem: str):
     if not tem_cargo_soberba(interaction.user):
@@ -803,7 +820,22 @@ async def falar(interaction: discord.Interaction, mensagem: str):
         pass
 
 # -------------------------
-# comando /setupcarente (centro de tickets)
+# comando /sairfila (resolve caso usuário 'ignorar' a msg e não consiga usar o botão)
+# -------------------------
+@bot.tree.command(name="sairfila", description="sair da fila de carentes")
+async def sairfila(interaction: discord.Interaction):
+    uid = interaction.user.id
+    if uid in fila_carentes:
+        try:
+            fila_carentes.remove(uid)
+        except ValueError:
+            pass
+        await interaction.response.send_message("você saiu da fila.", ephemeral=True)
+    else:
+        await interaction.response.send_message("você não estava na fila.", ephemeral=True)
+
+# -------------------------
+# comando /setupcarente (centro de tickets) - agora salva o canal para avisos
 # -------------------------
 @bot.tree.command(name="setupcarente", description="configura o sistema de carentes (admin)")
 async def setupcarente(interaction: discord.Interaction):
@@ -818,7 +850,9 @@ async def setupcarente(interaction: discord.Interaction):
     )
     view = TicketView()
     try:
-        await interaction.channel.send(embed=embed, view=view)
+        sent = await interaction.channel.send(embed=embed, view=view)
+        # salva o canal de setup para avisos futuros
+        SETUP_CHANNELS[interaction.guild.id] = interaction.channel.id
         await interaction.response.send_message("✅ sistema configurado (mensagem enviada neste canal).", ephemeral=True)
     except Exception:
         await interaction.response.send_message("erro ao enviar a mensagem de setup.", ephemeral=True)
