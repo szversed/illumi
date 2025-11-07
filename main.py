@@ -1,5 +1,4 @@
-# bot_carencia.py
-# código completo integrado
+# bot_carencia_full.py
 # requisitos: discord.py 2.x
 # defina a variável de ambiente TOKEN antes de rodar
 
@@ -64,7 +63,7 @@ blocked_nick = {}  # user_id -> nick (None means allowed again)
 # nome base para canais (será numerado: pecadores, pecadores-1, pecadores-2...)
 CHANNEL_BASE = "pecadores"
 
-# mapping guild.id -> setup channel id (onde /setupcarente foi usado)
+# (opcional) mapping guild.id -> setup channel id (mantido para compatibilidade)
 SETUP_CHANNELS = {}
 
 # -------------------------
@@ -466,15 +465,17 @@ async def tentar_formar_dupla(guild: discord.Guild):
                 fila_carentes.append(u2_id)
                 return
 
-            # novo: avisa no canal onde o /setupcarente foi usado (se configurado)
-            setup_channel_id = SETUP_CHANNELS.get(guild.id)
-            if setup_channel_id:
-                try:
-                    setup_channel = guild.get_channel(setup_channel_id)
-                    if setup_channel:
-                        await setup_channel.send(f"💞 **par encontrado!** {u1.mention} e {u2.mention} foram levados para {canal.mention}")
-                except Exception:
-                    pass
+            # novo: avisa os dois por dm (mensagem privada) contendo a menção do canal
+            aviso_text = f"💞 **par encontrado!** vocês foram levados para {canal.mention}"
+            try:
+                await u1.send(aviso_text)
+            except Exception:
+                # se dm falhar (usuário bloqueou dms), ignora
+                pass
+            try:
+                await u2.send(aviso_text)
+            except Exception:
+                pass
 
             # iniciar timer de accept timeout (1 minuto)
             asyncio.create_task(_accept_timeout_handler(canal, timeout=ACCEPT_TIMEOUT))
@@ -835,7 +836,7 @@ async def sairfila(interaction: discord.Interaction):
         await interaction.response.send_message("você não estava na fila.", ephemeral=True)
 
 # -------------------------
-# comando /setupcarente (centro de tickets) - agora salva o canal para avisos
+# comando /setupcarente (centro de tickets) - mantém o envio do painel
 # -------------------------
 @bot.tree.command(name="setupcarente", description="configura o sistema de carentes (admin)")
 async def setupcarente(interaction: discord.Interaction):
@@ -851,7 +852,7 @@ async def setupcarente(interaction: discord.Interaction):
     view = TicketView()
     try:
         sent = await interaction.channel.send(embed=embed, view=view)
-        # salva o canal de setup para avisos futuros
+        # opcional: salvar o canal de setup para compatibilidade (não usado para DM flow)
         SETUP_CHANNELS[interaction.guild.id] = interaction.channel.id
         await interaction.response.send_message("✅ sistema configurado (mensagem enviada neste canal).", ephemeral=True)
     except Exception:
