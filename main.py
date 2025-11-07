@@ -1,4 +1,4 @@
-# bot_carencia_full.py
+# bot_carencia_full_fixed_slash.py
 # requisitos: discord.py 2.x
 # defina a variável de ambiente TOKEN antes de rodar
 
@@ -566,6 +566,7 @@ async def _auto_close_channel_after(canal: discord.TextChannel, segundos: int):
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online!")
+    # sincroniza commands por guild para evitar inconsistências no client
     for guild in bot.guilds:
         try:
             bot.tree.clear_commands(guild=guild)
@@ -736,7 +737,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # -------------------------
-# comandos administrativos (tree) - mantidos
+# comandos administrativos (tree) - atualizados com app_commands.describe / Range
 # -------------------------
 @bot.tree.command(name="menu_admin", description="menu administrativo")
 async def menu_admin(interaction: discord.Interaction):
@@ -749,6 +750,7 @@ async def menu_admin(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="clear", description="apaga mensagens")
+@app_commands.describe(quantidade="quantas mensagens apagar (1-100)")
 async def clear(interaction: discord.Interaction, quantidade: int):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
@@ -763,6 +765,7 @@ async def clear(interaction: discord.Interaction, quantidade: int):
 
 
 @bot.tree.command(name="ban", description="bane usuário")
+@app_commands.describe(usuario="usuário a banir")
 async def ban(interaction: discord.Interaction, usuario: discord.Member):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
@@ -775,13 +778,15 @@ async def ban(interaction: discord.Interaction, usuario: discord.Member):
         await interaction.response.send_message("erro ao banir", ephemeral=True)
 
 
+# use Range pra forçar o tipo inteiro e limites — isso ajuda o client a validar a opção corretamente
 @bot.tree.command(name="mute", description="mute usuário")
-async def mute(interaction: discord.Interaction, tempo: int, usuario: discord.Member):
+@app_commands.describe(tempo="tempo em minutos (1-10080)", usuario="usuário a ser mutado")
+async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 1, 10080], usuario: discord.Member):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     role = await ensure_muted_role(interaction.guild)
-    fim = datetime.utcnow() + timedelta(minutes=tempo)
+    fim = datetime.utcnow() + timedelta(minutes=int(tempo))
     try:
         if role:
             await usuario.add_roles(role)
@@ -793,6 +798,7 @@ async def mute(interaction: discord.Interaction, tempo: int, usuario: discord.Me
 
 
 @bot.tree.command(name="link", description="ativa/desativa antilink")
+@app_commands.describe(estado="on ou off")
 async def link(interaction: discord.Interaction, estado: str):
     global antilink_ativo
     if not tem_cargo_soberba(interaction.user):
@@ -810,6 +816,7 @@ async def link(interaction: discord.Interaction, estado: str):
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="falar", description="bot envia mensagem")
+@app_commands.describe(mensagem="mensagem a ser enviada")
 async def falar(interaction: discord.Interaction, mensagem: str):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
@@ -857,6 +864,26 @@ async def setupcarente(interaction: discord.Interaction):
         await interaction.response.send_message("✅ sistema configurado (mensagem enviada neste canal).", ephemeral=True)
     except Exception:
         await interaction.response.send_message("erro ao enviar a mensagem de setup.", ephemeral=True)
+
+# -------------------------
+# comando /sync (apenas admins) -> força sync das application commands no guild
+# -------------------------
+@bot.tree.command(name="sync", description="sincroniza comandos (admin)")
+async def sync(interaction: discord.Interaction, guild_id: int = None):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("🚫 apenas administradores podem usar isso", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if guild_id:
+            guild = discord.Object(id=guild_id)
+            await bot.tree.sync(guild=guild)
+            await interaction.followup.send(f"✅ comandos sincronizados no guild {guild_id}", ephemeral=True)
+        else:
+            await bot.tree.sync()
+            await interaction.followup.send("✅ comandos sincronizados globalmente", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"erro ao sincronizar: {e}", ephemeral=True)
 
 # -------------------------
 # evento: canal deletado -> cleanup active users
