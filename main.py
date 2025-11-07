@@ -18,15 +18,18 @@ from discord import app_commands
 # -------------------------
 # intents & bot
 # -------------------------
+
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.guilds = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------
 # constantes / configurações
 # -------------------------
+
 PAIR_COOLDOWNS = {}            # frozenset({u1,u2}) -> timestamp until they can't re-pair
 PAIR_COOLDOWN_SECONDS = 3 * 60  # 3 minutos de cooldown após recusar
 ACCEPT_TIMEOUT = 60            # 1 minuto para ambos aceitarem
@@ -36,6 +39,7 @@ SAFETY_TIMEOUT = 60 * 30       # 30 minutos safety para canais pendentes
 # -------------------------
 # estados / estruturas
 # -------------------------
+
 antilink_ativo = True
 mutes = {}                       # user_id -> datetime fim do mute
 invite_cache = {}
@@ -55,7 +59,7 @@ user_repeat_msgs = defaultdict(list)
 # fila e ativos
 fila_carentes = []            # lista de user ids na fila (ordem)
 active_users = set()          # user ids que estão em um canal criado (pendente ou ativo)
-active_channels = {}          # channel_id -> dict {u1,u2,accepted_set,message_id,created_at,started}
+active_channels = {}          # channel_id -> dict {u1,u2,accepted,message_id,created_at,started}
 
 # nickname lock: quando soberba altera, guardamos o valor bloqueado
 blocked_nick = {}  # user_id -> nick (None means allowed again)
@@ -76,14 +80,11 @@ def tem_cargo_soberba(member: discord.Member) -> bool:
     except Exception:
         return False
 
-
 def is_exempt(member: discord.Member) -> bool:
     return member.bot or tem_cargo_soberba(member)
 
-
 def pair_key(u1_id: int, u2_id: int):
     return frozenset({u1_id, u2_id})
-
 
 def can_pair(u1_id: int, u2_id: int) -> bool:
     key = pair_key(u1_id, u2_id)
@@ -92,18 +93,16 @@ def can_pair(u1_id: int, u2_id: int) -> bool:
         return True
     return time.time() >= ts
 
-
 def set_pair_cooldown(u1_id: int, u2_id: int):
     key = pair_key(u1_id, u2_id)
     PAIR_COOLDOWNS[key] = time.time() + PAIR_COOLDOWN_SECONDS
-
 
 async def ensure_muted_role(guild: discord.Guild):
     role = discord.utils.get(guild.roles, name="mutado")
     if not role:
         try:
             role = await guild.create_role(name="mutado", reason="cargo criado para mutes")
-            for canal in guild.channels:
+            for canal in guild.text_channels:
                 try:
                     await canal.set_permissions(role, send_messages=False, speak=False)
                 except Exception:
@@ -112,14 +111,13 @@ async def ensure_muted_role(guild: discord.Guild):
             return None
     return role
 
-
 async def aplicar_mute(guild: discord.Guild, member: discord.Member, minutos: int, motivo: str = None, canal_log: discord.TextChannel = None):
     role = await ensure_muted_role(guild)
     fim = datetime.utcnow() + timedelta(minutes=minutos)
     try:
         if role:
             await member.add_roles(role)
-        mutes[member.id] = fim
+            mutes[member.id] = fim
     except Exception:
         if canal_log:
             try:
@@ -139,7 +137,6 @@ async def aplicar_mute(guild: discord.Guild, member: discord.Member, minutos: in
             await canal_log.send(embed=embed)
         except Exception:
             pass
-
 
 async def encerrar_canal_e_cleanup(canal: discord.abc.GuildChannel):
     try:
@@ -163,7 +160,6 @@ async def encerrar_canal_e_cleanup(canal: discord.abc.GuildChannel):
     except Exception:
         pass
 
-
 async def atualizar_convites_safe(guild: discord.Guild):
     try:
         convites = await guild.invites()
@@ -174,12 +170,13 @@ async def atualizar_convites_safe(guild: discord.Guild):
 # -------------------------
 # views: leave, ticket, conversation buttons
 # -------------------------
+
 class LeaveQueueView(discord.ui.View):
     def __init__(self, user_id):
         super().__init__(timeout=None)
         self.user_id = user_id
 
-    @discord.ui.button(label="sair da fila", style=discord.ButtonStyle.danger, custom_id=None)
+    @discord.ui.button(label="sair da fila", style=discord.ButtonStyle.danger, custom_id="leavefila_button")
     async def sair(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("isso é só pra você.", ephemeral=True)
@@ -198,7 +195,6 @@ class LeaveQueueView(discord.ui.View):
             await interaction.message.edit(view=self)
         except Exception:
             pass
-
 
 class TicketView(discord.ui.View):
     def __init__(self):
@@ -222,7 +218,6 @@ class TicketView(discord.ui.View):
         await interaction.response.send_message("💘 você entrou na fila. (apenas você vê esta mensagem)", ephemeral=True, view=view_leave)
 
         await tentar_formar_dupla(guild)
-
 
 class ConversationView(discord.ui.View):
     def __init__(self, canal: discord.TextChannel, u1: discord.Member, u2: discord.Member, message_id: int):
@@ -327,7 +322,6 @@ class ConversationView(discord.ui.View):
         await encerrar_canal_e_cleanup(self.canal)
         await interaction.response.send_message("você recusou a conversa (apenas você vê).", ephemeral=True)
 
-
 class EncerrarView(discord.ui.View):
     def __init__(self, canal: discord.TextChannel, u1: discord.Member, u2: discord.Member):
         super().__init__(timeout=None)
@@ -340,6 +334,7 @@ class EncerrarView(discord.ui.View):
         if interaction.user.id not in (self.u1.id, self.u2.id):
             await interaction.response.send_message("você não pode encerrar.", ephemeral=True)
             return
+
         # edita última mensagem opcionalmente e fecha
         data = active_channels.get(self.canal.id, {})
         try:
@@ -362,9 +357,62 @@ class EncerrarView(discord.ui.View):
         await encerrar_canal_e_cleanup(self.canal)
         await interaction.response.send_message("canal encerrado.", ephemeral=True)
 
+    @discord.ui.button(label="pausar", style=discord.ButtonStyle.secondary, custom_id="encerrar_pausar")
+    async def pausar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # pausar: remove permissão de envio pra ambos (mas mantém view_channel)
+        if interaction.user.id not in (self.u1.id, self.u2.id) and not tem_cargo_soberba(interaction.user):
+            await interaction.response.send_message("você não pode pausar.", ephemeral=True)
+            return
+        try:
+            await self.canal.set_permissions(self.u1, send_messages=False, view_channel=True)
+            await self.canal.set_permissions(self.u2, send_messages=False, view_channel=True)
+            # editar mensagem principal para indicar pausa (se existir)
+            data = active_channels.get(self.canal.id, {})
+            if data and data.get("message_id"):
+                try:
+                    msg = await self.canal.fetch_message(data["message_id"])
+                    embed = discord.Embed(
+                        title="conversa pausada",
+                        description="a conversa foi pausada. ninguém pode enviar mensagens até que alguém clique em **resumir**.",
+                        color=discord.Color.gold()
+                    )
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await interaction.response.send_message("conversa pausada.", ephemeral=True)
+
+    @discord.ui.button(label="resumir", style=discord.ButtonStyle.success, custom_id="encerrar_resumir")
+    async def resumir(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # resumir: restaura permissão de envio pra ambos (apenas participantes)
+        if interaction.user.id not in (self.u1.id, self.u2.id) and not tem_cargo_soberba(interaction.user):
+            await interaction.response.send_message("você não pode resumir.", ephemeral=True)
+            return
+        try:
+            await self.canal.set_permissions(self.u1, send_messages=True, view_channel=True)
+            await self.canal.set_permissions(self.u2, send_messages=True, view_channel=True)
+            # editar mensagem principal para indicar retomada (se existir)
+            data = active_channels.get(self.canal.id, {})
+            if data and data.get("message_id"):
+                try:
+                    msg = await self.canal.fetch_message(data["message_id"])
+                    embed = discord.Embed(
+                        title="conversa retomada",
+                        description=f"{self.u1.mention} e {self.u2.mention} — a conversa foi retomada.",
+                        color=discord.Color.green()
+                    )
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await interaction.response.send_message("conversa resumida.", ephemeral=True)
+
 # -------------------------
 # geração de nome: pecadores, pecadores-1, pecadores-2, ...
 # -------------------------
+
 def gerar_nome_pecadores(guild: discord.Guild):
     base = CHANNEL_BASE
     existing = {c.name for c in guild.text_channels}
@@ -381,6 +429,7 @@ def gerar_nome_pecadores(guild: discord.Guild):
 # -------------------------
 # tentativa de formar dupla
 # -------------------------
+
 async def tentar_formar_dupla(guild: discord.Guild):
     if len(fila_carentes) < 2:
         return
@@ -486,6 +535,7 @@ async def tentar_formar_dupla(guild: discord.Guild):
 # -------------------------
 # timers / handlers
 # -------------------------
+
 async def _accept_timeout_handler(canal: discord.TextChannel, timeout: int = ACCEPT_TIMEOUT):
     await asyncio.sleep(timeout)
     data = active_channels.get(canal.id)
@@ -515,7 +565,6 @@ async def _accept_timeout_handler(canal: discord.TextChannel, timeout: int = ACC
             await asyncio.sleep(1)
             await encerrar_canal_e_cleanup(canal)
 
-
 async def _safety_close_if_no_interaction(canal: discord.TextChannel, timeout: int = SAFETY_TIMEOUT):
     await asyncio.sleep(timeout)
     data = active_channels.get(canal.id)
@@ -536,7 +585,6 @@ async def _safety_close_if_no_interaction(canal: discord.TextChannel, timeout: i
         await asyncio.sleep(1)
         await encerrar_canal_e_cleanup(canal)
 
-
 async def _auto_close_channel_after(canal: discord.TextChannel, segundos: int):
     await asyncio.sleep(segundos)
     if canal.id not in active_channels:
@@ -555,14 +603,15 @@ async def _auto_close_channel_after(canal: discord.TextChannel, segundos: int):
                 await msg.edit(embed=embed, view=None)
             except Exception:
                 pass
-        await asyncio.sleep(1)
-        await encerrar_canal_e_cleanup(canal)
+            await asyncio.sleep(1)
+            await encerrar_canal_e_cleanup(canal)
     except Exception:
         pass
 
 # -------------------------
 # eventos principais
 # -------------------------
+
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online!")
@@ -582,11 +631,10 @@ async def on_ready():
         await atualizar_convites_safe(guild)
     if not verificar_mutes.is_running():
         verificar_mutes.start()
-        print("🔁 loop de mutes iniciado.")
-
+    print("🔁 loop de mutes iniciado.")
 
 @bot.event
-async def on_member_join(member):
+async def on_member_join(member: discord.Member):
     guild = member.guild
     antes = invite_cache.get(guild.id, {})
     depois = {}
@@ -613,9 +661,8 @@ async def on_member_join(member):
             convites_por_usuario[criador.id].append(member.id)
     invite_cache[guild.id] = depois
 
-
 @bot.event
-async def on_member_remove(member):
+async def on_member_remove(member: discord.Member):
     for criador_id, lista in list(convites_por_usuario.items()):
         if member.id in lista:
             lista.remove(member.id)
@@ -626,6 +673,7 @@ async def on_member_remove(member):
 # -------------------------
 # loop de mutes
 # -------------------------
+
 @tasks.loop(seconds=30)
 async def verificar_mutes():
     agora = datetime.utcnow()
@@ -648,8 +696,9 @@ async def verificar_mutes():
 # -------------------------
 # on_message: anti-flood antilink repeat
 # -------------------------
+
 @bot.event
-async def on_message(message):
+async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
@@ -739,15 +788,15 @@ async def on_message(message):
 # -------------------------
 # comandos administrativos (tree) - atualizados com app_commands.describe / Range
 # -------------------------
+
 @bot.tree.command(name="menu_admin", description="menu administrativo")
 async def menu_admin(interaction: discord.Interaction):
     if not tem_cargo_soberba(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
-    texto = "🧹 /clear <quantidade>\n🔨 /ban <usuário>\n🔇 /mute <tempo> <usuário>\n🚫 /link <on|off>\n💬 /falar <mensagem>"
+    texto = "🧹 /clear \n🔨 /ban <usuário>\n🔇 /mute  <usuário>\n🚫 /link <on|off>\n💬 /falar "
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 @bot.tree.command(name="clear", description="apaga mensagens")
 @app_commands.describe(quantidade="quantas mensagens apagar (1-100)")
@@ -763,7 +812,6 @@ async def clear(interaction: discord.Interaction, quantidade: int):
     except Exception:
         await interaction.followup.send("erro ao apagar mensagens", ephemeral=True)
 
-
 @bot.tree.command(name="ban", description="bane usuário")
 @app_commands.describe(usuario="usuário a banir")
 async def ban(interaction: discord.Interaction, usuario: discord.Member):
@@ -777,8 +825,6 @@ async def ban(interaction: discord.Interaction, usuario: discord.Member):
     except Exception:
         await interaction.response.send_message("erro ao banir", ephemeral=True)
 
-
-# use Range pra forçar o tipo inteiro e limites — isso ajuda o client a validar a opção corretamente
 @bot.tree.command(name="mute", description="mute usuário")
 @app_commands.describe(tempo="tempo em minutos (1-10080)", usuario="usuário a ser mutado")
 async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 1, 10080], usuario: discord.Member):
@@ -790,12 +836,11 @@ async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 
     try:
         if role:
             await usuario.add_roles(role)
-        mutes[usuario.id] = fim
+            mutes[usuario.id] = fim
         embed = discord.Embed(title="🔇 Usuário mutado", description=f"{usuario.mention} mutado por {tempo} minutos.", color=discord.Color.purple())
         await interaction.response.send_message(embed=embed)
     except Exception:
         await interaction.response.send_message("erro ao mutar", ephemeral=True)
-
 
 @bot.tree.command(name="link", description="ativa/desativa antilink")
 @app_commands.describe(estado="on ou off")
@@ -830,6 +875,7 @@ async def falar(interaction: discord.Interaction, mensagem: str):
 # -------------------------
 # comando /sairfila (resolve caso usuário 'ignorar' a msg e não consiga usar o botão)
 # -------------------------
+
 @bot.tree.command(name="sairfila", description="sair da fila de carentes")
 async def sairfila(interaction: discord.Interaction):
     uid = interaction.user.id
@@ -845,12 +891,12 @@ async def sairfila(interaction: discord.Interaction):
 # -------------------------
 # comando /setupcarente (centro de tickets) - mantém o envio do painel
 # -------------------------
+
 @bot.tree.command(name="setupcarente", description="configura o sistema de carentes (admin)")
 async def setupcarente(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("🚫 apenas administradores podem usar isso", ephemeral=True)
         return
-
     embed = discord.Embed(
         title="💔 está se sentindo carente?",
         description="clique em **entrar na fila 💘** pra conversar com alguém.\nninguém além de você verá a confirmação.",
@@ -868,6 +914,7 @@ async def setupcarente(interaction: discord.Interaction):
 # -------------------------
 # comando /sync (apenas admins) -> força sync das application commands no guild
 # -------------------------
+
 @bot.tree.command(name="sync", description="sincroniza comandos (admin)")
 async def sync(interaction: discord.Interaction, guild_id: int = None):
     if not interaction.user.guild_permissions.administrator:
@@ -888,8 +935,9 @@ async def sync(interaction: discord.Interaction, guild_id: int = None):
 # -------------------------
 # evento: canal deletado -> cleanup active users
 # -------------------------
+
 @bot.event
-async def on_guild_channel_delete(channel):
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
     if not isinstance(channel, discord.TextChannel):
         return
     cid = channel.id
@@ -909,18 +957,17 @@ async def on_guild_channel_delete(channel):
 # -------------------------
 # nickname lock: monitorar alterações feitas por soberba e impedir usuários de mudarem
 # -------------------------
+
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     # detectar mudança de nickname
     try:
+        # se não mudou nada de nickname, pode ser outras atualizações
         if before.nick == after.nick:
-            # nada a fazer, mas pode ser tentativa do próprio usuário de mudar
             # se houver bloqueio e after.nick != blocked value, reverter silenciosamente
             b = blocked_nick.get(after.id, None)
             if b is not None:
-                # if blocked value is None => unlocked; else ensure nick is b
-                if b is not None and after.nick != b:
-                    # tentar reverter
+                if after.nick != b:
                     try:
                         await after.edit(nick=b, reason="revertido por bot: apelido bloqueado por soberba")
                     except Exception:
@@ -929,11 +976,9 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
         # se mudou nick, verificar quem mudou via audit logs
         guild = after.guild
-        # pega último audit log member update
         entry = None
         async for e in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_update):
             if e.target.id == after.id:
-                # assume o mais recente relevante
                 entry = e
                 break
         if entry and entry.user:
@@ -942,17 +987,14 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             if tem_cargo_soberba(actor):
                 # if soberba removed nick (after.nick is None), remove block
                 if after.nick is None:
-                    # desbloquear
                     if after.id in blocked_nick:
                         del blocked_nick[after.id]
                 else:
-                    # bloquear para o nick atual
                     blocked_nick[after.id] = after.nick
             else:
                 # alteração feita pelo próprio ou por outro sem soberba: se existe bloqueio, reverter
                 b = blocked_nick.get(after.id, None)
                 if b is not None and after.nick != b:
-                    # reverter silenciosamente
                     try:
                         await after.edit(nick=b, reason="revertido por bot: apelido bloqueado por soberba")
                     except Exception:
@@ -964,6 +1006,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 # -------------------------
 # execução
 # -------------------------
+
 if __name__ == "__main__":
     token = os.getenv("TOKEN")
     if not token:
