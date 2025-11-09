@@ -740,29 +740,144 @@ async def on_member_remove(member: discord.Member):
                 del convites_por_usuario[criador_id]
             break
 
-# loop de mutes
-@tasks.loop(seconds=30)
-async def verificar_mutes():
-    agora = datetime.utcnow()
-    expirados = [user_id for user_id, fim in list(mutes.items()) if agora >= fim]
-    for user_id in expirados:
-        for guild in bot.guilds:
-            member = guild.get_member(user_id)
-            if member:
-                role = discord.utils.get(guild.roles, name="mutado")
-                if role and role in member.roles:
-                    try:
-                        await member.remove_roles(role)
-                    except Exception:
-                        pass
-                    try:
-                        del mutes[user_id]
-                    except KeyError:
-                        pass
+# NOVO: Evento para detectar quando um bot é adicionado ao servidor
+@bot.event
+async def on_member_join(member: discord.Member):
+    # Verifica se o membro que entrou é um bot
+    if member.bot:
+        guild = member.guild
+        canal_log = discord.utils.get(guild.text_channels, name="mod-logs")
+        
+        try:
+            # Primeiro bane o bot
+            await member.ban(reason="Bot não autorizado detectado no servidor")
+            
+            # Tenta descobrir quem adicionou o bot através dos audit logs
+            async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
+                if entry.target.id == member.id:
+                    # Bane quem adicionou o bot
+                    await entry.user.ban(reason="Adicionou bot não autorizado ao servidor")
+                    
+                    # Log da ação
+                    if canal_log:
+                        embed = discord.Embed(
+                            title="🚨 BOT NÃO AUTORIZADO DETECTADO",
+                            description=f"**Bot:** {member} ({member.id})\n**Adicionado por:** {entry.user} ({entry.user.id})\n**Ação:** Ambos foram banidos automaticamente",
+                            color=discord.Color.red(),
+                            timestamp=datetime.utcnow()
+                        )
+                        await canal_log.send(embed=embed)
+                    break
+            else:
+                # Se não encontrou quem adicionou no audit log
+                if canal_log:
+                    embed = discord.Embed(
+                        title="🚨 BOT NÃO AUTORIZADO DETECTADO",
+                        description=f"**Bot:** {member} ({member.id})\n**Adicionado por:** Não identificado\n**Ação:** Bot foi banido automaticamente",
+                        color=discord.Color.orange(),
+                        timestamp=datetime.utcnow()
+                    )
+                    await canal_log.send(embed=embed)
+                    
+        except Exception as e:
+            # Em caso de erro, tenta pelo menos banir o bot
+            try:
+                await member.ban(reason="Bot não autorizado - sistema de proteção")
+            except Exception:
+                pass
+            
+            if canal_log:
+                embed = discord.Embed(
+                    title="❌ ERRO NO SISTEMA ANTI-BOT",
+                    description=f"Erro ao processar bot não autorizado: {str(e)}",
+                    color=discord.Color.dark_red(),
+                    timestamp=datetime.utcnow()
+                )
+                await canal_log.send(embed=embed)
+    
+    else:
+        # Código original de tracking de convites (mantido)
+        guild = member.guild
+        antes = invite_cache.get(guild.id, {})
+        depois = {}
+        convites = []
+        try:
+            convites = await guild.invites()
+            depois = {i.code: i.uses for i in convites}
+        except Exception:
+            pass
+        usado = None
+        for codigo, usos in depois.items():
+            if codigo in antes and usos > antes[codigo]:
+                usado = codigo
+                break
+        if usado:
+            criador = None
+            for i in convites:
+                if i.code == usado:
+                    criador = i.inviter
+                    break
+            if criador:
+                if criador.id not in convites_por_usuario:
+                    convites_por_usuario[criador.id] = []
+                convites_por_usuario[criador.id].append(member.id)
+        invite_cache[guild.id] = depois
 
-# on_message: anti-flood antilink repeat
+# NOVO: Evento para banir bots que enviem mensagens
 @bot.event
 async def on_message(message: discord.Message):
+    # Se a mensagem é de um bot que não é o próprio bot do sistema
+    if message.author.bot and message.author.id != bot.user.id:
+        guild = message.guild
+        canal_log = discord.utils.get(guild.text_channels, name="mod-logs")
+        
+        try:
+            # Bane o bot que enviou mensagem
+            await message.author.ban(reason="Bot não autorizado enviando mensagens")
+            
+            # Tenta descobrir quem adicionou o bot
+            async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
+                if entry.target.id == message.author.id:
+                    # Bane quem adicionou o bot
+                    await entry.user.ban(reason="Adicionou bot que enviou mensagens")
+                    
+                    # Log da ação
+                    if canal_log:
+                        embed = discord.Embed(
+                            title="🚨 BOT ENVIANDO MENSAGENS",
+                            description=f"**Bot:** {message.author} ({message.author.id})\n**Mensagem:** {message.content}\n**Adicionado por:** {entry.user} ({entry.user.id})\n**Ação:** Ambos foram banidos automaticamente",
+                            color=discord.Color.red(),
+                            timestamp=datetime.utcnow()
+                        )
+                        await canal_log.send(embed=embed)
+                    break
+            else:
+                # Se não encontrou quem adicionou
+                if canal_log:
+                    embed = discord.Embed(
+                        title="🚨 BOT ENVIANDO MENSAGENS",
+                        description=f"**Bot:** {message.author} ({message.author.id})\n**Mensagem:** {message.content}\n**Adicionado por:** Não identificado\n**Ação:** Bot foi banido automaticamente",
+                        color=discord.Color.orange(),
+                        timestamp=datetime.utcnow()
+                    )
+                    await canal_log.send(embed=embed)
+            
+            # Deleta a mensagem do bot
+            try:
+                await message.delete()
+            except Exception:
+                pass
+                
+            return  # Impede processamento adicional desta mensagem
+            
+        except Exception as e:
+            # Em caso de erro, tenta pelo menos banir o bot
+            try:
+                await message.author.ban(reason="Bot não autorizado enviando mensagens - sistema de proteção")
+            except Exception:
+                pass
+
+    # Código original de processamento de mensagens (mantido)
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
@@ -848,6 +963,26 @@ async def on_message(message: discord.Message):
         return
 
     await bot.process_commands(message)
+
+# loop de mutes
+@tasks.loop(seconds=30)
+async def verificar_mutes():
+    agora = datetime.utcnow()
+    expirados = [user_id for user_id, fim in list(mutes.items()) if agora >= fim]
+    for user_id in expirados:
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if member:
+                role = discord.utils.get(guild.roles, name="mutado")
+                if role and role in member.roles:
+                    try:
+                        await member.remove_roles(role)
+                    except Exception:
+                        pass
+                    try:
+                        del mutes[user_id]
+                    except KeyError:
+                        pass
 
 # comandos administrativos (tree) - atualizados com app_commands.describe / Range
 @bot.tree.command(name="menu_admin", description="menu administrativo")
