@@ -29,7 +29,6 @@ SAFETY_TIMEOUT = 60 * 30 # 30 minutos safety para canais pendentes
 
 # estados / estruturas
 antilink_ativo = True
-mutes = {} # user_id -> datetime fim do mute
 text_mutes = {} # user_id -> datetime fim do mute de texto
 invite_cache = {}
 convites_por_usuario = {}
@@ -168,110 +167,8 @@ async def remover_mute_texto(guild: discord.Guild, member: discord.Member, canal
         )
         await canal_log.send(embed=embed)
 
-async def ensure_muted_role(guild: discord.Guild):
-    role = discord.utils.get(guild.roles, name="mutado")
-    if not role:
-        try:
-            role = await guild.create_role(name="mutado", reason="cargo criado para mutes")
-            # Aplica restrições em todos os canais de texto
-            for canal in guild.text_channels:
-                try:
-                    await canal.set_permissions(role, send_messages=False, read_messages=True)
-                except Exception:
-                    pass
-            # Aplica restrições em todos os canais de voz
-            for canal in guild.voice_channels:
-                try:
-                    await canal.set_permissions(role, speak=False, connect=True)
-                except Exception:
-                    pass
-        except Exception:
-            return None
-    return role
-
-async def aplicar_mute(guild: discord.Guild, member: discord.Member, minutos: int, motivo: str = None, canal_log: discord.TextChannel = None):
-    role = await ensure_muted_role(guild)
-    fim = datetime.utcnow() + timedelta(minutes=minutos)
-    try:
-        if role:
-            await member.add_roles(role)
-            mutes[member.id] = fim
-    except Exception:
-        if canal_log:
-            try:
-                await canal_log.send(f"⚠️ não foi possível aplicar role mutado em {member.mention}.")
-            except Exception:
-                pass
-        return
-
-    if canal_log:
-        tempo_formatado = format_tempo(minutos)
-        embed = discord.Embed(
-            title="🔇 mute aplicado",
-            description=f"{member.mention} mutado por {tempo_formatado}.\nMotivo: {motivo or 'repetição/anti-spam'}",
-            color=discord.Color.purple(),
-            timestamp=datetime.utcnow()
-        )
-        try:
-            await canal_log.send(embed=embed)
-        except Exception:
-            pass
-
-async def aplicar_mute_global(guild: discord.Guild, minutos: int, motivo: str, canal_log: discord.TextChannel = None):
-    """Aplica mute global em todos os membros que não têm cargos especiais"""
-    role = await ensure_muted_role(guild)
-    if not role:
-        return
-    
-    contador = 0
-    for member in guild.members:
-        if not is_exempt(member):
-            try:
-                await member.add_roles(role)
-                contador += 1
-            except Exception:
-                pass
-    
-    if canal_log:
-        tempo_formatado = format_tempo(minutos)
-        embed = discord.Embed(
-            title="🔇 MUTE GLOBAL APLICADO",
-            description=f"Mute global aplicado por {tempo_formatado}.\n{contador} membros mutados.\nMotivo: {motivo}",
-            color=discord.Color.dark_red(),
-            timestamp=datetime.utcnow()
-        )
-        await canal_log.send(embed=embed)
-
-async def remover_mute_global(guild: discord.Guild, canal_log: discord.TextChannel = None):
-    """Remove mute global de todos os membros"""
-    role = discord.utils.get(guild.roles, name="mutado")
-    if not role:
-        return
-    
-    contador = 0
-    for member in guild.members:
-        if role in member.roles:
-            try:
-                await member.remove_roles(role)
-                contador += 1
-            except Exception:
-                pass
-    
-    if canal_log:
-        embed = discord.Embed(
-            title="🔊 MUTE GLOBAL REMOVIDO",
-            description=f"Mute global removido.\n{contador} membros desmutados.",
-            color=discord.Color.green(),
-            timestamp=datetime.utcnow()
-        )
-        await canal_log.send(embed=embed)
-
 async def aplicar_mute_call(guild: discord.Guild, voice_channel: discord.VoiceChannel, motivo: str, canal_log: discord.TextChannel = None):
     """Muta todos os membros em um canal de voz que não têm cargos especiais"""
-    role = await ensure_muted_role(guild)
-    if not role:
-        return
-    
     contador = 0
     for member in voice_channel.members:
         if not is_exempt(member):
@@ -905,11 +802,9 @@ async def on_ready():
     print("✅ comandos sincronizados")
     for guild in bot.guilds:
         await atualizar_convites_safe(guild)
-    if not verificar_mutes.is_running():
-        verificar_mutes.start()
     if not verificar_text_mutes.is_running():
         verificar_text_mutes.start()
-    print("🔁 loops de mutes iniciados.")
+    print("🔁 loop de mutes de texto iniciado.")
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -948,37 +843,6 @@ async def on_member_remove(member: discord.Member):
                 del convites_por_usuario[criador_id]
             break
 
-# loop de mutes
-@tasks.loop(seconds=30)
-async def verificar_mutes():
-    agora = datetime.utcnow()
-    expirados = [user_id for user_id, fim in list(mutes.items()) if agora >= fim]
-    for user_id in expirados:
-        for guild in bot.guilds:
-            member = guild.get_member(user_id)
-            if member:
-                role = discord.utils.get(guild.roles, name="mutado")
-                if role and role in member.roles:
-                    try:
-                        await member.remove_roles(role)
-                        # Log de mute removido
-                        canal_log = discord.utils.get(guild.text_channels, name="mod-logs")
-                        if canal_log:
-                            tempo_restante = format_tempo(int((fim - agora).total_seconds() / 60))
-                            embed = discord.Embed(
-                                title="🔊 Mute Removido",
-                                description=f"{member.mention} foi desmutado automaticamente.\nTempo restante quebrado: {tempo_restante}",
-                                color=discord.Color.green(),
-                                timestamp=datetime.utcnow()
-                            )
-                            await canal_log.send(embed=embed)
-                    except Exception:
-                        pass
-                    try:
-                        del mutes[user_id]
-                    except KeyError:
-                        pass
-
 # loop de mutes de texto
 @tasks.loop(seconds=30)
 async def verificar_text_mutes():
@@ -989,7 +853,8 @@ async def verificar_text_mutes():
         for guild in bot.guilds:
             member = guild.get_member(user_id)
             if member:
-                await remover_mute_texto(guild, member)
+                canal_log = discord.utils.get(guild.text_channels, name="mod-logs")
+                await remover_mute_texto(guild, member, canal_log)
                 try:
                     del text_mutes[user_id]
                 except KeyError:
@@ -1007,9 +872,8 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Verificar se usuário está mutado (tanto por role quanto por mute de texto)
-    muted_role = discord.utils.get(message.guild.roles, name="mutado")
-    if (muted_role and muted_role in member.roles) or member.id in text_mutes:
+    # Verificar se usuário está mutado em texto
+    if member.id in text_mutes:
         try:
             await message.delete()
         except Exception:
