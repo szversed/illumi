@@ -30,6 +30,7 @@ SAFETY_TIMEOUT = 60 * 30 # 30 minutos safety para canais pendentes
 # estados / estruturas
 antilink_ativo = True
 mutes = {} # user_id -> datetime fim do mute
+text_mutes = {} # user_id -> datetime fim do mute de texto
 invite_cache = {}
 convites_por_usuario = {}
 
@@ -115,6 +116,57 @@ def format_tempo(minutos: int) -> str:
         partes.append(f"{mins} minuto{'s' if mins > 1 else ''}")
     
     return " e ".join(partes)
+
+async def aplicar_mute_texto(guild: discord.Guild, member: discord.Member, minutos: int, motivo: str = None, canal_log: discord.TextChannel = None):
+    """Aplica mute de texto removendo permissões de enviar mensagens em todos os canais"""
+    fim = datetime.utcnow() + timedelta(minutes=minutos)
+    
+    # Remove permissão de enviar mensagens em todos os canais de texto
+    canais_afetados = 0
+    for canal in guild.text_channels:
+        try:
+            await canal.set_permissions(member, send_messages=False)
+            canais_afetados += 1
+        except Exception:
+            pass
+    
+    text_mutes[member.id] = fim
+    
+    if canal_log:
+        tempo_formatado = format_tempo(minutos)
+        embed = discord.Embed(
+            title="🔇 Mute de Texto Aplicado",
+            description=f"{member.mention} mutado em texto por {tempo_formatado}.\n{canais_afetados} canais afetados.\nMotivo: {motivo}",
+            color=discord.Color.purple(),
+            timestamp=datetime.utcnow()
+        )
+        try:
+            await canal_log.send(embed=embed)
+        except Exception:
+            pass
+
+async def remover_mute_texto(guild: discord.Guild, member: discord.Member, canal_log: discord.TextChannel = None):
+    """Remove mute de texto restaurando permissões normais"""
+    # Restaura permissões normais em todos os canais de texto
+    canais_afetados = 0
+    for canal in guild.text_channels:
+        try:
+            await canal.set_permissions(member, send_messages=None)  # None = herdar permissões
+            canais_afetados += 1
+        except Exception:
+            pass
+    
+    if member.id in text_mutes:
+        del text_mutes[member.id]
+    
+    if canal_log:
+        embed = discord.Embed(
+            title="🔊 Mute de Texto Removido",
+            description=f"{member.mention} teve o mute de texto removido.\n{canais_afetados} canais afetados.",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        await canal_log.send(embed=embed)
 
 async def ensure_muted_role(guild: discord.Guild):
     role = discord.utils.get(guild.roles, name="mutado")
@@ -256,6 +308,36 @@ async def remover_mute_call(guild: discord.Guild, voice_channel: discord.VoiceCh
             timestamp=datetime.utcnow()
         )
         await canal_log.send(embed=embed)
+
+async def bloquear_todos_canais_texto(guild: discord.Guild, motivo: str):
+    """Bloqueia o envio de mensagens em todos os canais de texto"""
+    canais_bloqueados = 0
+    canais_protegidos = ["mod-logs"]  # Canais que NÃO devem ser bloqueados
+    
+    for canal in guild.text_channels:
+        if canal.name.lower() not in canais_protegidos:
+            try:
+                # Remove permissão de enviar mensagens para @everyone
+                await canal.set_permissions(guild.default_role, send_messages=False)
+                canais_bloqueados += 1
+            except Exception:
+                pass
+    
+    return canais_bloqueados
+
+async def desbloquear_todos_canais_texto(guild: discord.Guild):
+    """Restaura as permissões normais de envio de mensagens"""
+    canais_desbloqueados = 0
+    
+    for canal in guild.text_channels:
+        try:
+            # Restaura permissão de enviar mensagens para @everyone (None = herdar do canal pai)
+            await canal.set_permissions(guild.default_role, send_messages=None)
+            canais_desbloqueados += 1
+        except Exception:
+            pass
+    
+    return canais_desbloqueados
 
 async def encerrar_canal_e_cleanup(canal: discord.abc.GuildChannel):
     try:
@@ -825,7 +907,9 @@ async def on_ready():
         await atualizar_convites_safe(guild)
     if not verificar_mutes.is_running():
         verificar_mutes.start()
-    print("🔁 loop de mutes iniciado.")
+    if not verificar_text_mutes.is_running():
+        verificar_text_mutes.start()
+    print("🔁 loops de mutes iniciados.")
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -895,6 +979,22 @@ async def verificar_mutes():
                     except KeyError:
                         pass
 
+# loop de mutes de texto
+@tasks.loop(seconds=30)
+async def verificar_text_mutes():
+    agora = datetime.utcnow()
+    expirados = [user_id for user_id, fim in list(text_mutes.items()) if agora >= fim]
+    
+    for user_id in expirados:
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if member:
+                await remover_mute_texto(guild, member)
+                try:
+                    del text_mutes[user_id]
+                except KeyError:
+                    pass
+
 # on_message: anti-flood antilink repeat
 @bot.event
 async def on_message(message: discord.Message):
@@ -907,9 +1007,9 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Verificar se usuário está mutado
+    # Verificar se usuário está mutado (tanto por role quanto por mute de texto)
     muted_role = discord.utils.get(message.guild.roles, name="mutado")
-    if muted_role and muted_role in member.roles:
+    if (muted_role and muted_role in member.roles) or member.id in text_mutes:
         try:
             await message.delete()
         except Exception:
@@ -985,7 +1085,7 @@ async def on_message(message: discord.Message):
                 await msg_to_delete.delete()
             except Exception:
                 pass
-        await aplicar_mute(message.guild, member, minutos, motivo, canal_log)
+        await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
         repeat_count[member.id] = 0
         last_msg[member.id] = None
         user_repeat_msgs[member.id] = []
@@ -1037,12 +1137,15 @@ async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     
+    canal_log = discord.utils.get(interaction.guild.text_channels, name="mod-logs")
     tempo_formatado = format_tempo(tempo)
-    await aplicar_mute(interaction.guild, usuario, tempo, f"Comando por {interaction.user}")
+    
+    # Aplica mute de texto (removendo permissões de enviar mensagens)
+    await aplicar_mute_texto(interaction.guild, usuario, tempo, f"Comando por {interaction.user}", canal_log)
     
     embed = discord.Embed(
-        title="🔇 Usuário mutado", 
-        description=f"{usuario.mention} mutado por {tempo_formatado}.",
+        title="🔇 Usuário mutado em texto", 
+        description=f"{usuario.mention} mutado por {tempo_formatado}.\nO usuário não poderá enviar mensagens em nenhum canal de texto.",
         color=discord.Color.purple()
     )
     await interaction.response.send_message(embed=embed)
@@ -1112,20 +1215,28 @@ async def muteall(interaction: discord.Interaction, estado: str):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     
-    canal_log = discord.utils.get(interaction.guild.text_channels, name="mod-logs")
-    
     if estado.lower() == "on":
         mute_all_ativo = True
-        await aplicar_mute_global(interaction.guild, 10080, f"Comando por {interaction.user}", canal_log)  # 10080 minutos = 1 semana
-        embed = discord.Embed(title="🌐 Mute Global Ativado", description="Todos os canais de texto foram mutados.", color=discord.Color.dark_red())
+        # Bloqueia o envio de mensagens em todos os canais de texto
+        canais_bloqueados = await bloquear_todos_canais_texto(interaction.guild, f"Comando por {interaction.user}")
+        embed = discord.Embed(
+            title="🌐 MUTEALL ATIVADO", 
+            description=f"Todos os canais de texto foram bloqueados.\n{canais_bloqueados} canais afetados.",
+            color=discord.Color.dark_red()
+        )
     elif estado.lower() == "off":
         mute_all_ativo = False
-        await remover_mute_global(interaction.guild, canal_log)
-        embed = discord.Embed(title="🌐 Mute Global Desativado", description="Todos os canais de texto foram desmutados.", color=discord.Color.green())
+        # Desbloqueia o envio de mensagens em todos os canais de texto
+        canais_desbloqueados = await desbloquear_todos_canais_texto(interaction.guild)
+        embed = discord.Embed(
+            title="🌐 MUTEALL DESATIVADO", 
+            description=f"Todos os canais de texto foram desbloqueados.\n{canais_desbloqueados} canais afetados.",
+            color=discord.Color.green()
+        )
     else:
         await interaction.response.send_message("use on ou off.", ephemeral=True)
         return
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # comando /sairfila (resolve caso usuário 'ignorar' a msg e não consiga usar o botão)
 @bot.tree.command(name="sairfila", description="sair da fila de carentes")
