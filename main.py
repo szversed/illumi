@@ -11,7 +11,6 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 
-# intents & bot
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -20,65 +19,64 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# constantes / configurações
-PAIR_COOLDOWNS = {} # frozenset({u1,u2}) -> timestamp until they can't re-pair
-PAIR_COOLDOWN_SECONDS = 3 * 60 # 3 minutos de cooldown após recusar
-ACCEPT_TIMEOUT = 60 # 1 minuto para ambos aceitarem
-CHANNEL_DURATION = 7 * 60 # 7 minutos de conversa após ambos aceitarem
-SAFETY_TIMEOUT = 60 * 30 # 30 minutos safety para canais pendentes
+PAIR_COOLDOWNS = {}
+PAIR_COOLDOWN_SECONDS = 3 * 60
+ACCEPT_TIMEOUT = 60
+CHANNEL_DURATION = 7 * 60
+SAFETY_TIMEOUT = 60 * 30
 
-# estados / estruturas
 antilink_ativo = True
-text_mutes = {} # user_id -> datetime fim do mute de texto
+text_mutes = {}
 invite_cache = {}
 convites_por_usuario = {}
 
-# gêneros dos usuários
-user_genders = {} # user_id -> "homem" ou "mulher"
-user_preferences = {} # user_id -> "homem", "mulher" ou "ambos"
+user_genders = {}
+user_preferences = {}
 
-# anti-flood (mensagens diferentes)
 FLOOD_LIMIT = 10
-FLOOD_WINDOW = 10.0 # segundos
+FLOOD_WINDOW = 10.0
 user_msg_times = defaultdict(lambda: deque())
 
-# repetição de mensagem
 last_msg = {}
 repeat_count = defaultdict(int)
 mute_level = defaultdict(int)
 user_repeat_msgs = defaultdict(list)
 
-# fila e ativos
-fila_carentes = [] # lista de dicts {user_id, gender, preference} na fila
-active_users = set() # user ids que estão em um canal criado (pendente ou ativo)
-active_channels = {} # channel_id -> dict {u1,u2,accepted,message_id,created_at,started}
+active_users = set()
+active_channels = {}
 
-# nickname lock: quando soberba altera, guardamos o valor bloqueado
-blocked_nick = {} # user_id -> nick (None means allowed again)
+blocked_nick = {}
 
-# mute call e mute all
 mute_call_ativo = False
 mute_all_ativo = False
 
-# nome base para canais (será numerado: pecadores, pecadores-1, pecadores-2...)
 CHANNEL_BASE = "pecadores"
 
-# (opcional) mapping guild.id -> setup channel id (mantido para compatibilidade)
 SETUP_CHANNELS = {}
 
-# filas de música por usuário
-music_queues = {} # user_id -> list de musicas
-music_players = {} # user_id -> current player
+music_queues = {}
+music_players = {}
 
-# utilitários
 def tem_cargo_soberba(member: discord.Member) -> bool:
     try:
-        return any(r.name.lower() in ["soberba", "ira", "inveja"] for r in member.roles)
+        return any(r.name.lower() == "soberba" for r in member.roles)
+    except Exception:
+        return False
+
+def tem_cargo_ira(member: discord.Member) -> bool:
+    try:
+        return any(r.name.lower() == "ira" for r in member.roles)
+    except Exception:
+        return False
+
+def tem_cargo_admin(member: discord.Member) -> bool:
+    try:
+        return any(r.name.lower() in ["soberba", "ira"] for r in member.roles)
     except Exception:
         return False
 
 def is_exempt(member: discord.Member) -> bool:
-    return member.bot or tem_cargo_soberba(member)
+    return member.bot or tem_cargo_admin(member)
 
 def pair_key(u1_id: int, u2_id: int):
     return frozenset({u1_id, u2_id})
@@ -98,7 +96,6 @@ def get_gender_display(gender):
     return "pecador" if gender == "homem" else "pecadora"
 
 def format_tempo(minutos: int) -> str:
-    """Formata minutos para uma string legível (dias, horas, minutos)"""
     if minutos <= 0:
         return "0 minutos"
     
@@ -117,10 +114,8 @@ def format_tempo(minutos: int) -> str:
     return " e ".join(partes)
 
 async def aplicar_mute_texto(guild: discord.Guild, member: discord.Member, minutos: int, motivo: str = None, canal_log: discord.TextChannel = None):
-    """Aplica mute de texto removendo permissões de enviar mensagens em todos os canais"""
     fim = datetime.utcnow() + timedelta(minutes=minutos)
     
-    # Remove permissão de enviar mensagens em todos os canais de texto
     canais_afetados = 0
     for canal in guild.text_channels:
         try:
@@ -145,12 +140,10 @@ async def aplicar_mute_texto(guild: discord.Guild, member: discord.Member, minut
             pass
 
 async def remover_mute_texto(guild: discord.Guild, member: discord.Member, canal_log: discord.TextChannel = None):
-    """Remove mute de texto restaurando permissões normais"""
-    # Restaura permissões normais em todos os canais de texto
     canais_afetados = 0
     for canal in guild.text_channels:
         try:
-            await canal.set_permissions(member, send_messages=None)  # None = herdar permissões
+            await canal.set_permissions(member, send_messages=None)
             canais_afetados += 1
         except Exception:
             pass
@@ -168,7 +161,6 @@ async def remover_mute_texto(guild: discord.Guild, member: discord.Member, canal
         await canal_log.send(embed=embed)
 
 async def aplicar_mute_call(guild: discord.Guild, voice_channel: discord.VoiceChannel, motivo: str, canal_log: discord.TextChannel = None):
-    """Muta todos os membros em um canal de voz que não têm cargos especiais"""
     contador = 0
     for member in voice_channel.members:
         if not is_exempt(member):
@@ -188,7 +180,6 @@ async def aplicar_mute_call(guild: discord.Guild, voice_channel: discord.VoiceCh
         await canal_log.send(embed=embed)
 
 async def remover_mute_call(guild: discord.Guild, voice_channel: discord.VoiceChannel, canal_log: discord.TextChannel = None):
-    """Remove mute de todos os membros em um canal de voz"""
     contador = 0
     for member in voice_channel.members:
         try:
@@ -207,14 +198,12 @@ async def remover_mute_call(guild: discord.Guild, voice_channel: discord.VoiceCh
         await canal_log.send(embed=embed)
 
 async def bloquear_todos_canais_texto(guild: discord.Guild, motivo: str):
-    """Bloqueia o envio de mensagens em todos os canais de texto"""
     canais_bloqueados = 0
-    canais_protegidos = ["mod-logs"]  # Canais que NÃO devem ser bloqueados
+    canais_protegidos = ["mod-logs"]
     
     for canal in guild.text_channels:
         if canal.name.lower() not in canais_protegidos:
             try:
-                # Remove permissão de enviar mensagens para @everyone
                 await canal.set_permissions(guild.default_role, send_messages=False)
                 canais_bloqueados += 1
             except Exception:
@@ -223,12 +212,10 @@ async def bloquear_todos_canais_texto(guild: discord.Guild, motivo: str):
     return canais_bloqueados
 
 async def desbloquear_todos_canais_texto(guild: discord.Guild):
-    """Restaura as permissões normais de envio de mensagens"""
     canais_desbloqueados = 0
     
     for canal in guild.text_channels:
         try:
-            # Restaura permissão de enviar mensagens para @everyone (None = herdar do canal pai)
             await canal.set_permissions(guild.default_role, send_messages=None)
             canais_desbloqueados += 1
         except Exception:
@@ -265,278 +252,6 @@ async def atualizar_convites_safe(guild: discord.Guild):
     except Exception:
         invite_cache[guild.id] = {}
 
-# views: leave, ticket, conversation buttons
-class LeaveQueueView(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-
-    @discord.ui.button(label="sair da fila", style=discord.ButtonStyle.danger, custom_id="leavefila_button")
-    async def sair(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("isso é só pra você.", ephemeral=True)
-            return
-        removed = False
-        for entry in list(fila_carentes):
-            if entry["user_id"] == self.user_id:
-                fila_carentes.remove(entry)
-                removed = True
-                break
-        if removed:
-            await interaction.response.send_message("você saiu da fila.", ephemeral=True)
-        else:
-            await interaction.response.send_message("você não estava mais na fila.", ephemeral=True)
-        try:
-            button.disabled = True
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
-
-class GenderSetupView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Homem", style=discord.ButtonStyle.primary, custom_id="gender_homem")
-    async def set_homem(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_genders[interaction.user.id] = "homem"
-        await interaction.response.send_message("✅ Seu gênero foi definido como **Homem**. Agora escolha qual gênero você quer encontrar:", 
-                                              view=PreferenceSetupView(), ephemeral=True)
-
-    @discord.ui.button(label="Mulher", style=discord.ButtonStyle.primary, custom_id="gender_mulher")
-    async def set_mulher(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_genders[interaction.user.id] = "mulher"
-        await interaction.response.send_message("✅ Seu gênero foi definido como **Mulher**. Agora escolha qual gênero você quer encontrar:", 
-                                              view=PreferenceSetupView(), ephemeral=True)
-
-class PreferenceSetupView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Homens", style=discord.ButtonStyle.primary, custom_id="pref_homem")
-    async def pref_homem(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_preferences[interaction.user.id] = "homem"
-        gender = user_genders.get(interaction.user.id, "homem")
-        gender_display = get_gender_display(gender)
-        
-        embed = discord.Embed(
-            title="🎯 Configuração Concluída!",
-            description=f"Você é **{gender_display}** e quer encontrar **homens**.\n\nAgora você pode entrar na fila para conversar.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Mulheres", style=discord.ButtonStyle.primary, custom_id="pref_mulher")
-    async def pref_mulher(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_preferences[interaction.user.id] = "mulher"
-        gender = user_genders.get(interaction.user.id, "homem")
-        gender_display = get_gender_display(gender)
-        
-        embed = discord.Embed(
-            title="🎯 Configuração Concluída!",
-            description=f"Você é **{gender_display}** e quer encontrar **mulheres**.\n\nAgora você pode entrar na fila para conversar.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Ambos", style=discord.ButtonStyle.primary, custom_id="pref_ambos")
-    async def pref_ambos(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_preferences[interaction.user.id] = "ambos"
-        gender = user_genders.get(interaction.user.id, "homem")
-        gender_display = get_gender_display(gender)
-        
-        embed = discord.Embed(
-            title="🎯 Configuração Concluída!",
-            description=f"Você é **{gender_display}** e quer encontrar **ambos os gêneros**.\n\nAgora você pode entrar na fila para conversar.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-class TicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Configurar Gênero 💘", style=discord.ButtonStyle.primary, custom_id="config_gender")
-    async def config_gender(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🎯 Primeiro, escolha seu gênero:", 
-                                              view=GenderSetupView(), ephemeral=True)
-
-    @discord.ui.button(label="Entrar na Fila 💘", style=discord.ButtonStyle.success, custom_id="ticket_entrar")
-    async def entrar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-        guild = interaction.guild
-
-        if user.id not in user_genders or user.id not in user_preferences:
-            await interaction.response.send_message("❌ Você precisa configurar seu gênero e preferência primeiro!", 
-                                                  ephemeral=True)
-            return
-
-        if user.id in active_users:
-            await interaction.response.send_message("😅 você já está em um chat ativo.", ephemeral=True)
-            return
-        
-        # Verificar se já está na fila
-        for entry in fila_carentes:
-            if entry["user_id"] == user.id:
-                await interaction.response.send_message("❗ você já está na fila.", ephemeral=True)
-                return
-
-        # Adicionar à fila com informações de gênero
-        fila_entry = {
-            "user_id": user.id,
-            "gender": user_genders[user.id],
-            "preference": user_preferences[user.id]
-        }
-        fila_carentes.append(fila_entry)
-        
-        gender_display = get_gender_display(user_genders[user.id])
-        embed = discord.Embed(
-            title="✅ Entrou na Fila",
-            description=f"Você é **{gender_display}** procurando **{user_preferences[user.id]}**.\nAguarde enquanto encontramos alguém compatível para você!",
-            color=discord.Color.green()
-        )
-        
-        view_leave = LeaveQueueView(user.id)
-        await interaction.response.send_message(embed=embed, view=view_leave, ephemeral=True)
-        await tentar_formar_dupla(guild)
-
-class ConversationView(discord.ui.View):
-    def __init__(self, canal: discord.TextChannel, u1: discord.Member, u2: discord.Member, message_id: int):
-        super().__init__(timeout=None)
-        self.canal = canal
-        self.u1 = u1
-        self.u2 = u2
-        self.message_id = message_id
-
-    @discord.ui.button(label="aceitar 💞", style=discord.ButtonStyle.success, custom_id="conv_aceitar")
-    async def aceitar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = interaction.user.id
-        cid = self.canal.id
-        if uid not in (self.u1.id, self.u2.id):
-            await interaction.response.send_message("você não pode interagir aqui.", ephemeral=True)
-            return
-
-        data = active_channels.get(cid)
-        if not data:
-            await interaction.response.send_message("estado inválido.", ephemeral=True)
-            return
-        
-        accepted = data.setdefault("accepted", set())
-        accepted.add(uid)
-        
-        # atualiza a mesma mensagem com status
-        try:
-            msg = await self.canal.fetch_message(self.message_id)
-            embed = discord.Embed(
-                title="pecadores — confirmação",
-                description=(
-                    f"{self.u1.mention} {'✅' if self.u1.id in accepted else '❌'}\n"
-                    f"{self.u2.mention} {'✅' if self.u2.id in accepted else '❌'}\n\n"
-                    "aguardando ambos aceitarem..."
-                ),
-                color=discord.Color.purple()
-            )
-            await msg.edit(embed=embed, view=self)
-        except Exception:
-            pass
-        
-        # se ambos aceitaram
-        if self.u1.id in accepted and self.u2.id in accepted:
-            # permite envio de mensagens para ambos
-            try:
-                await self.canal.set_permissions(self.u1, send_messages=True, view_channel=True)
-                await self.canal.set_permissions(self.u2, send_messages=True, view_channel=True)
-            except Exception:
-                pass
-            
-            # substitui view por encerrar e edita embed de início
-            enc_view = EncerrarView(self.canal, self.u1, self.u2)
-            try:
-                msg = await self.canal.fetch_message(self.message_id)
-                embed = discord.Embed(
-                    title="conversa iniciada — pecadores",
-                    description=(
-                        f"{self.u1.mention} e {self.u2.mention} — a conversa foi liberada. "
-                        f"vocês têm {int(CHANNEL_DURATION/60)} minutos. clique em **encerrar agora** para fechar."
-                    ),
-                    color=discord.Color.green()
-                )
-                await msg.edit(embed=embed, view=enc_view)
-            except Exception:
-                pass
-            
-            # marca início e agendar fechamento automático em CHANNEL_DURATION
-            active_channels[cid]["started"] = True
-            active_channels[cid]["accepted"] = set([self.u1.id, self.u2.id])
-            asyncio.create_task(_auto_close_channel_after(canal=self.canal, segundos=CHANNEL_DURATION))
-        
-        await interaction.response.send_message("sua resposta foi registrada (apenas você vê).", ephemeral=True)
-
-    @discord.ui.button(label="recusar 💔", style=discord.ButtonStyle.danger, custom_id="conv_recusar")
-    async def recusar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = interaction.user.id
-        cid = self.canal.id
-        if uid not in (self.u1.id, self.u2.id):
-            await interaction.response.send_message("você não pode interagir aqui.", ephemeral=True)
-            return
-
-        # aplica cooldown entre os dois para não reaparecerem por 3 minutos
-        set_pair_cooldown(self.u1.id, self.u2.id)
-        
-        # edita a mesma mensagem mostrando recusa e fecha canal
-        try:
-            msg = await self.canal.fetch_message(self.message_id)
-            embed = discord.Embed(
-                title="conversa recusada",
-                description=(
-                    f"{interaction.user.mention} recusou a conversa. o canal será encerrado.\n\n"
-                    "vocês poderão tentar se encontrar novamente somente após 3 minutos."
-                ),
-                color=discord.Color.dark_red()
-            )
-            await msg.edit(embed=embed, view=None)
-        except Exception:
-            pass
-        
-        # pequeno delay para permitir visualização da edição
-        await asyncio.sleep(1)
-        await encerrar_canal_e_cleanup(self.canal)
-        await interaction.response.send_message("você recusou a conversa (apenas você vê).", ephemeral=True)
-
-class EncerrarView(discord.ui.View):
-    def __init__(self, canal: discord.TextChannel, u1: discord.Member, u2: discord.Member):
-        super().__init__(timeout=None)
-        self.canal = canal
-        self.u1 = u1
-        self.u2 = u2
-
-    @discord.ui.button(label="encerrar agora", style=discord.ButtonStyle.danger, custom_id="encerrar_agora")
-    async def encerrar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id not in (self.u1.id, self.u2.id):
-            await interaction.response.send_message("você não pode encerrar.", ephemeral=True)
-            return
-
-        # edita última mensagem opcionalmente e fecha
-        data = active_channels.get(self.canal.id, {})
-        try:
-            msg = None
-            if data and data.get("message_id"):
-                try:
-                    msg = await self.canal.fetch_message(data["message_id"])
-                except Exception:
-                    msg = None
-            if msg:
-                embed = discord.Embed(
-                    title="canal encerrado",
-                    description="o canal foi encerrado pelo usuário.",
-                    color=discord.Color.dark_gray()
-                )
-                await msg.edit(embed=embed, view=None)
-        except Exception:
-            pass
-        
-        await encerrar_canal_e_cleanup(self.canal)
-        await interaction.response.send_message("canal encerrado.", ephemeral=True)
-
 class MusicView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
@@ -548,7 +263,6 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
-        # Lógica para pausar música vai aqui
         await interaction.response.send_message("⏸️ Música pausada.", ephemeral=True)
 
     @discord.ui.button(label="▶️ Resumir", style=discord.ButtonStyle.secondary, custom_id="music_resumir")
@@ -557,7 +271,6 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
-        # Lógica para resumir música vai aqui
         await interaction.response.send_message("▶️ Música resumida.", ephemeral=True)
 
     @discord.ui.button(label="⏹️ Parar", style=discord.ButtonStyle.danger, custom_id="music_parar")
@@ -566,17 +279,14 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
-        # Lógica para parar música vai aqui
         await interaction.response.send_message("⏹️ Música parada.", ephemeral=True)
 
-# geração de nome: pecadores, pecadores-1, pecadores-2, ...
 def gerar_nome_pecadores(guild: discord.Guild):
     base = CHANNEL_BASE
     existing = {c.name for c in guild.text_channels}
     if base not in existing:
         return base
     
-    # encontra o menor índice livre começando por 1
     i = 1
     while True:
         candidate = f"{base}-{i}"
@@ -584,211 +294,22 @@ def gerar_nome_pecadores(guild: discord.Guild):
             return candidate
         i += 1
 
-# tentativa de formar dupla
 async def tentar_formar_dupla(guild: discord.Guild):
-    if len(fila_carentes) < 2:
-        return
+    pass
 
-    # procura duas pessoas que sejam compatíveis
-    for i in range(len(fila_carentes)):
-        for j in range(i + 1, len(fila_carentes)):
-            entry1 = fila_carentes[i]
-            entry2 = fila_carentes[j]
-            
-            u1_id = entry1["user_id"]
-            u2_id = entry2["user_id"]
-            
-            # Verificar compatibilidade de gênero
-            compatible = False
-            pref1 = entry1["preference"]
-            pref2 = entry2["preference"]
-            gender1 = entry1["gender"]
-            gender2 = entry2["gender"]
-            
-            # Usuário 1 quer o gênero do usuário 2 OU ambos
-            if pref1 == gender2 or pref1 == "ambos":
-                # Usuário 2 quer o gênero do usuário 1 OU ambos
-                if pref2 == gender1 or pref2 == "ambos":
-                    compatible = True
-            
-            if not compatible:
-                continue
-                
-            if u1_id in active_users or u2_id in active_users:
-                continue
-            if not can_pair(u1_id, u2_id):
-                continue
-
-            # remove ambos da fila (se ainda lá)
-            try:
-                fila_carentes.remove(entry1)
-                fila_carentes.remove(entry2)
-            except ValueError:
-                pass
-            
-            u1 = guild.get_member(u1_id)
-            u2 = guild.get_member(u2_id)
-            if not u1 or not u2:
-                # se não existirem mais (sairam do servidor), continua
-                continue
-            
-            # gera nome "pecadores", "pecadores-1", ...
-            nome_canal = gerar_nome_pecadores(guild)
-            
-            # overwrites: ambos podem ver, mas não enviar até aceitarem
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                u1: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-                u2: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-            }
-            
-            try:
-                canal = await guild.create_text_channel(nome_canal, overwrites=overwrites, reason="canal pecadores temporário")
-            except Exception:
-                # se falhar, devolve os usuários à fila
-                fila_carentes.append(entry1)
-                fila_carentes.append(entry2)
-                return
-            
-            # marca como ativos (impede entrar novamente na fila)
-            active_users.add(u1_id)
-            active_users.add(u2_id)
-            active_channels[canal.id] = {
-                "u1": u1_id,
-                "u2": u2_id,
-                "accepted": set(),
-                "message_id": None,
-                "created_at": time.time(),
-                "started": False
-            }
-            
-            # envia única mensagem com botões (será editada)
-            gender1_display = get_gender_display(gender1)
-            gender2_display = get_gender_display(gender2)
-            
-            embed = discord.Embed(
-                title="pecadores — confirmação",
-                description=(
-                    f"{u1.mention} ({gender1_display}) & {u2.mention} ({gender2_display})\n\n"
-                    "aguardando confirmação: ambos têm que aceitar para poderem conversar.\n\n"
-                    "ninguém poderá enviar mensagens até os dois aceitarem.\n"
-                    f"vocês têm {int(ACCEPT_TIMEOUT)} segundos para aceitar; caso contrário o canal será encerrado."
-                ),
-                color=discord.Color.purple()
-            )
-            view = ConversationView(canal, u1, u2, message_id=0)
-            try:
-                msg = await canal.send(embed=embed, view=view)
-                active_channels[canal.id]["message_id"] = msg.id
-                view.message_id = msg.id
-            except Exception:
-                # cleanup e devolver à fila
-                await encerrar_canal_e_cleanup(canal)
-                fila_carentes.append(entry1)
-                fila_carentes.append(entry2)
-                return
-            
-            # novo: avisa os dois por dm (mensagem privada) contendo a menção do canal
-            aviso_text = f"💞 **par encontrado!** vocês foram levados para {canal.mention}"
-            try:
-                await u1.send(aviso_text)
-            except Exception:
-                # se dm falhar (usuário bloqueou dms), ignora
-                pass
-            try:
-                await u2.send(aviso_text)
-            except Exception:
-                pass
-            
-            # iniciar timer de accept timeout (1 minuto)
-            asyncio.create_task(_accept_timeout_handler(canal, timeout=ACCEPT_TIMEOUT))
-            # safety close long timeout
-            asyncio.create_task(_safety_close_if_no_interaction(canal, timeout=SAFETY_TIMEOUT))
-            return
-
-# timers / handlers
 async def _accept_timeout_handler(canal: discord.TextChannel, timeout: int = ACCEPT_TIMEOUT):
-    await asyncio.sleep(timeout)
-    data = active_channels.get(canal.id)
-    if not data:
-        return
-    
-    # se ainda não foi iniciado (ou seja, não ambos aceitaram)
-    if not data.get("started", False):
-        accepted = data.get("accepted", set())
-        if len(accepted) < 2:
-            # aplica cooldown entre os dois para evitar pair imediato
-            u1 = data.get("u1")
-            u2 = data.get("u2")
-            if u1 and u2:
-                set_pair_cooldown(u1, u2)
-            
-            # edita mensagem para avisar timeout e fecha
-            try:
-                msg = await canal.fetch_message(data["message_id"])
-                embed = discord.Embed(
-                    title="canal encerrado (não houve aceitação)",
-                    description="o tempo para aceitar expirou. o canal será encerrado.\n"
-                    "vocês poderão tentar novamente após 3 minutos.",
-                    color=discord.Color.dark_gray()
-                )
-                await msg.edit(embed=embed, view=None)
-            except Exception:
-                pass
-            await asyncio.sleep(1)
-            await encerrar_canal_e_cleanup(canal)
+    pass
 
 async def _safety_close_if_no_interaction(canal: discord.TextChannel, timeout: int = SAFETY_TIMEOUT):
-    await asyncio.sleep(timeout)
-    data = active_channels.get(canal.id)
-    if not data:
-        return
-    
-    # se não começou nem houve accepted, fecha por safety
-    if not data.get("started", False):
-        try:
-            msg = await canal.fetch_message(data["message_id"])
-            embed = discord.Embed(
-                title="canal encerrado (inatividade)",
-                description="ninguém aceitou a conversa a tempo — canal encerrado.",
-                color=discord.Color.dark_gray()
-            )
-            await msg.edit(embed=embed, view=None)
-        except Exception:
-            pass
-        await asyncio.sleep(1)
-        await encerrar_canal_e_cleanup(canal)
+    pass
 
 async def _auto_close_channel_after(canal: discord.TextChannel, segundos: int):
-    await asyncio.sleep(segundos)
-    if canal.id not in active_channels:
-        return
-    try:
-        data = active_channels.get(canal.id)
-        if data:
-            # edita mensagem final
-            try:
-                msg = await canal.fetch_message(data["message_id"])
-                embed = discord.Embed(
-                    title="tempo esgotado",
-                    description="seu tempo de conversa terminou. canal encerrado.",
-                    color=discord.Color.dark_gray()
-                )
-                await msg.edit(embed=embed, view=None)
-            except Exception:
-                pass
-            await asyncio.sleep(1)
-            await encerrar_canal_e_cleanup(canal)
-    except Exception:
-        pass
+    pass
 
-# eventos principais
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online!")
     
-    # sincroniza commands por guild para evitar inconsistências no client
     for guild in bot.guilds:
         try:
             bot.tree.clear_commands(guild=guild)
@@ -843,7 +364,6 @@ async def on_member_remove(member: discord.Member):
                 del convites_por_usuario[criador_id]
             break
 
-# loop de mutes de texto
 @tasks.loop(seconds=30)
 async def verificar_text_mutes():
     agora = datetime.utcnow()
@@ -860,7 +380,6 @@ async def verificar_text_mutes():
                 except KeyError:
                     pass
 
-# on_message: anti-flood antilink repeat
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
@@ -872,7 +391,6 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Verificar se usuário está mutado em texto
     if member.id in text_mutes:
         try:
             await message.delete()
@@ -883,7 +401,6 @@ async def on_message(message: discord.Message):
     now = time.time()
     canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
 
-    # flood mensagens diferentes
     dq = user_msg_times[member.id]
     dq.append(now)
     while dq and now - dq[0] > FLOOD_WINDOW:
@@ -909,7 +426,6 @@ async def on_message(message: discord.Message):
             user_msg_times.pop(member.id, None)
         return
 
-    # antilink
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
         try:
             await message.delete()
@@ -922,7 +438,6 @@ async def on_message(message: discord.Message):
             pass
         return
 
-    # repetição de mensagem
     conteudo = re.sub(r'\s+', ' ', message.content.strip().lower())
     prev = last_msg.get(member.id)
     user_repeat_msgs[member.id].append(message)
@@ -957,20 +472,19 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
-# comandos administrativos (tree) - atualizados com app_commands.describe / Range
 @bot.tree.command(name="menu_admin", description="menu administrativo")
 async def menu_admin(interaction: discord.Interaction):
-    if not tem_cargo_soberba(interaction.user):
+    if not tem_cargo_admin(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
-    texto = "🧹 /clear \n🔨 /ban <usuário>\n🔇 /mute <usuário>\n🚫 /link <on|off>\n💬 /falar \n🔊 /mutecall <on|off>\n🌐 /muteall <on|off>"
+    texto = "🧹 /clear \n🔨 /ban <usuário(s)>\n🔇 /mute <usuário(s)>\n🚫 /link <on|off>\n💬 /falar \n🔊 /mutecall <on|off>\n🌐 /muteall <on|off>"
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="clear", description="apaga mensagens")
 @app_commands.describe(quantidade="quantas mensagens apagar (1-100)")
 async def clear(interaction: discord.Interaction, quantidade: int):
-    if not tem_cargo_soberba(interaction.user):
+    if not tem_cargo_admin(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -981,44 +495,122 @@ async def clear(interaction: discord.Interaction, quantidade: int):
     except Exception:
         await interaction.followup.send("erro ao apagar mensagens", ephemeral=True)
 
-@bot.tree.command(name="ban", description="bane usuário")
-@app_commands.describe(usuario="usuário a banir")
-async def ban(interaction: discord.Interaction, usuario: discord.Member):
-    if not tem_cargo_soberba(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
-        return
-    try:
-        await interaction.guild.ban(usuario, reason=f"Banido por {interaction.user}")
-        embed = discord.Embed(title="🔨 Banido", description=f"{usuario.mention} foi banido.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed)
-    except Exception:
-        await interaction.response.send_message("erro ao banir", ephemeral=True)
-
-@bot.tree.command(name="mute", description="mute usuário")
-@app_commands.describe(tempo="tempo em minutos (1-10080)", usuario="usuário a ser mutado")
-async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 1, 10080], usuario: discord.Member):
-    if not tem_cargo_soberba(interaction.user):
+@bot.tree.command(name="ban", description="bane usuário(s)")
+@app_commands.describe(usuario="usuário a banir (múltiplos se for soberba)")
+@app_commands.rename(usuario="usuario")
+async def ban(interaction: discord.Interaction, usuario: str):
+    if not tem_cargo_admin(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     
+    membros_alvo = []
+    
+    if tem_cargo_soberba(interaction.user):
+        mencoes = re.findall(r'<@!?(\d+)>', usuario)
+        if not mencoes:
+            await interaction.response.send_message("❌ Soberba: Você deve mencionar um ou mais usuários.", ephemeral=True)
+            return
+        
+        for user_id in mencoes:
+            member = interaction.guild.get_member(int(user_id))
+            if member:
+                membros_alvo.append(member)
+    else:
+        mencoes = re.findall(r'<@!?(\d+)>', usuario)
+        if len(mencoes) != 1:
+            await interaction.response.send_message("❌ Ira: Você deve mencionar exatamente um usuário.", ephemeral=True)
+            return
+        
+        member = interaction.guild.get_member(int(mencoes[0]))
+        if member:
+            membros_alvo.append(member)
+        else:
+            await interaction.response.send_message("❌ Usuário não encontrado.", ephemeral=True)
+            return
+
+    if not membros_alvo:
+        await interaction.response.send_message("❌ Nenhum usuário válido encontrado para banir.", ephemeral=True)
+        return
+
+    banidos = []
+    erros = []
+    
+    for membro in membros_alvo:
+        try:
+            await interaction.guild.ban(membro, reason=f"Banido por {interaction.user}")
+            banidos.append(membro.mention)
+        except Exception:
+            erros.append(membro.mention)
+
+    if banidos:
+        embed = discord.Embed(title="🔨 Banido(s)", description=f"{', '.join(banidos)} foram banidos.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("❌ Erro ao banir todos os usuários mencionados.", ephemeral=True)
+
+@bot.tree.command(name="mute", description="mute usuário(s)")
+@app_commands.describe(tempo="tempo em minutos (1-10080)", usuario="usuário a ser mutado (múltiplos se for soberba)")
+@app_commands.rename(usuario="usuario")
+async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 1, 10080], usuario: str):
+    if not tem_cargo_admin(interaction.user):
+        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+        return
+    
+    membros_alvo = []
+    
+    if tem_cargo_soberba(interaction.user):
+        mencoes = re.findall(r'<@!?(\d+)>', usuario)
+        if not mencoes:
+            await interaction.response.send_message("❌ Soberba: Você deve mencionar um ou mais usuários.", ephemeral=True)
+            return
+        
+        for user_id in mencoes:
+            member = interaction.guild.get_member(int(user_id))
+            if member:
+                membros_alvo.append(member)
+    else:
+        mencoes = re.findall(r'<@!?(\d+)>', usuario)
+        if len(mencoes) != 1:
+            await interaction.response.send_message("❌ Ira: Você deve mencionar exatamente um usuário.", ephemeral=True)
+            return
+        
+        member = interaction.guild.get_member(int(mencoes[0]))
+        if member:
+            membros_alvo.append(member)
+        else:
+            await interaction.response.send_message("❌ Usuário não encontrado.", ephemeral=True)
+            return
+
+    if not membros_alvo:
+        await interaction.response.send_message("❌ Nenhum usuário válido encontrado para mutar.", ephemeral=True)
+        return
+
     canal_log = discord.utils.get(interaction.guild.text_channels, name="mod-logs")
     tempo_formatado = format_tempo(tempo)
+    mutados = []
     
-    # Aplica mute de texto (removendo permissões de enviar mensagens)
-    await aplicar_mute_texto(interaction.guild, usuario, tempo, f"Comando por {interaction.user}", canal_log)
-    
-    embed = discord.Embed(
-        title="🔇 Usuário mutado em texto", 
-        description=f"{usuario.mention} mutado por {tempo_formatado}.\nO usuário não poderá enviar mensagens em nenhum canal de texto.",
-        color=discord.Color.purple()
-    )
-    await interaction.response.send_message(embed=embed)
+    for membro in membros_alvo:
+        try:
+            await aplicar_mute_texto(interaction.guild, membro, tempo, f"Comando por {interaction.user}", canal_log)
+            mutados.append(membro.mention)
+        except Exception:
+            pass
+
+    if mutados:
+        embed = discord.Embed(
+            title="🔇 Usuário(s) mutado(s) em texto", 
+            description=f"{', '.join(mutados)} mutado(s) por {tempo_formatado}.\nO(s) usuário(s) não poderá(ão) enviar mensagens em nenhum canal de texto.",
+            color=discord.Color.purple()
+        )
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("❌ Erro ao mutar os usuários mencionados.", ephemeral=True)
 
 @bot.tree.command(name="link", description="ativa/desativa antilink")
 @app_commands.describe(estado="on ou off")
 async def link(interaction: discord.Interaction, estado: str):
     global antilink_ativo
-    if not tem_cargo_soberba(interaction.user):
+    if not tem_cargo_admin(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     if estado.lower() == "on":
@@ -1035,7 +627,7 @@ async def link(interaction: discord.Interaction, estado: str):
 @bot.tree.command(name="falar", description="bot envia mensagem")
 @app_commands.describe(mensagem="mensagem a ser enviada")
 async def falar(interaction: discord.Interaction, mensagem: str):
-    if not tem_cargo_soberba(interaction.user):
+    if not tem_cargo_admin(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     await interaction.response.send_message("✅ Mensagem enviada", ephemeral=True)
@@ -1048,7 +640,7 @@ async def falar(interaction: discord.Interaction, mensagem: str):
 @app_commands.describe(estado="on ou off")
 async def mutecall(interaction: discord.Interaction, estado: str):
     global mute_call_ativo
-    if not tem_cargo_soberba(interaction.user):
+    if not tem_cargo_admin(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     
@@ -1056,13 +648,11 @@ async def mutecall(interaction: discord.Interaction, estado: str):
     
     if estado.lower() == "on":
         mute_call_ativo = True
-        # Muta todos em todos os canais de voz
         for voice_channel in interaction.guild.voice_channels:
             await aplicar_mute_call(interaction.guild, voice_channel, f"Comando por {interaction.user}", canal_log)
         embed = discord.Embed(title="🔇 Mute em Call Ativado", color=discord.Color.orange())
     elif estado.lower() == "off":
         mute_call_ativo = False
-        # Desmuta todos em todos os canais de voz
         for voice_channel in interaction.guild.voice_channels:
             await remover_mute_call(interaction.guild, voice_channel, canal_log)
         embed = discord.Embed(title="🔊 Mute em Call Desativado", color=discord.Color.green())
@@ -1075,13 +665,12 @@ async def mutecall(interaction: discord.Interaction, estado: str):
 @app_commands.describe(estado="on ou off")
 async def muteall(interaction: discord.Interaction, estado: str):
     global mute_all_ativo
-    if not tem_cargo_soberba(interaction.user):
+    if not tem_cargo_admin(interaction.user):
         await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
         return
     
     if estado.lower() == "on":
         mute_all_ativo = True
-        # Bloqueia o envio de mensagens em todos os canais de texto
         canais_bloqueados = await bloquear_todos_canais_texto(interaction.guild, f"Comando por {interaction.user}")
         embed = discord.Embed(
             title="🌐 MUTEALL ATIVADO", 
@@ -1090,7 +679,6 @@ async def muteall(interaction: discord.Interaction, estado: str):
         )
     elif estado.lower() == "off":
         mute_all_ativo = False
-        # Desbloqueia o envio de mensagens em todos os canais de texto
         canais_desbloqueados = await desbloquear_todos_canais_texto(interaction.guild)
         embed = discord.Embed(
             title="🌐 MUTEALL DESATIVADO", 
@@ -1102,39 +690,6 @@ async def muteall(interaction: discord.Interaction, estado: str):
         return
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# comando /sairfila (resolve caso usuário 'ignorar' a msg e não consiga usar o botão)
-@bot.tree.command(name="sairfila", description="sair da fila de carentes")
-async def sairfila(interaction: discord.Interaction):
-    uid = interaction.user.id
-    # Remove da fila baseado no user_id
-    for entry in list(fila_carentes):
-        if entry["user_id"] == uid:
-            fila_carentes.remove(entry)
-            await interaction.response.send_message("você saiu da fila.", ephemeral=True)
-            return
-    await interaction.response.send_message("você não estava na fila.", ephemeral=True)
-
-# comando /setupcarente (centro de tickets) - mantém o envio do painel
-@bot.tree.command(name="setupcarente", description="configura o sistema de carentes (admin)")
-async def setupcarente(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("🚫 apenas administradores podem usar isso", ephemeral=True)
-        return
-    embed = discord.Embed(
-        title="💔 está se sentindo carente?",
-        description="**Primeiro configure seu gênero**, depois entre na fila para conversar com alguém.\nninguém além de você verá a confirmação.",
-        color=discord.Color.purple()
-    )
-    view = TicketView()
-    try:
-        sent = await interaction.channel.send(embed=embed, view=view)
-        # opcional: salvar o canal de setup para compatibilidade (não usado para DM flow)
-        SETUP_CHANNELS[interaction.guild.id] = interaction.channel.id
-        await interaction.response.send_message("✅ sistema configurado (mensagem enviada neste canal).", ephemeral=True)
-    except Exception:
-        await interaction.response.send_message("erro ao enviar a mensagem de setup.", ephemeral=True)
-
-# comando /sync (apenas admins) -> força sync das application commands no guild
 @bot.tree.command(name="sync", description="sincroniza comandos (admin)")
 async def sync(interaction: discord.Interaction, guild_id: int = None):
     if not interaction.user.guild_permissions.administrator:
@@ -1152,25 +707,6 @@ async def sync(interaction: discord.Interaction, guild_id: int = None):
     except Exception as e:
         await interaction.followup.send(f"erro ao sincronizar: {e}", ephemeral=True)
 
-# comando para ver configuração atual
-@bot.tree.command(name="meu_perfil", description="ver sua configuração atual de gênero e preferência")
-async def meu_perfil(interaction: discord.Interaction):
-    gender = user_genders.get(interaction.user.id)
-    preference = user_preferences.get(interaction.user.id)
-    
-    if not gender or not preference:
-        await interaction.response.send_message("❌ Você ainda não configurou seu gênero e preferência!", ephemeral=True)
-        return
-    
-    gender_display = get_gender_display(gender)
-    embed = discord.Embed(
-        title="👤 Seu Perfil",
-        description=f"**Gênero:** {gender_display}\n**Procurando:** {preference}",
-        color=discord.Color.blue()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# evento: canal deletado -> cleanup active users
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
     if not isinstance(channel, discord.TextChannel):
@@ -1189,7 +725,6 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
         except Exception:
             pass
 
-# evento: usuário entrando em call - aplicar mute se mute_call estiver ativo
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if mute_call_ativo and after.channel and not is_exempt(member):
@@ -1198,14 +733,10 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         except Exception:
             pass
 
-# nickname lock: monitorar alterações feitas por soberba e impedir usuários de mudarem
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    # detectar mudança de nickname
     try:
-        # se não mudou nada de nickname, pode ser outras atualizações
         if before.nick == after.nick:
-            # se houver bloqueio e after.nick != blocked value, reverter silenciosamente
             b = blocked_nick.get(after.id, None)
             if b is not None:
                 if after.nick != b:
@@ -1215,7 +746,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                         pass
             return
 
-        # se mudou nick, verificar quem mudou via audit logs
         guild = after.guild
         entry = None
         async for e in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_update):
@@ -1224,16 +754,13 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 break
         if entry and entry.user:
             actor = entry.user
-            # se quem alterou tem cargo soberba, bloqueamos o usuário para não poder mudar
             if tem_cargo_soberba(actor):
-                # if soberba removed nick (after.nick is None), remove block
                 if after.nick is None:
                     if after.id in blocked_nick:
                         del blocked_nick[after.id]
                 else:
                     blocked_nick[after.id] = after.nick
             else:
-                # alteração feita pelo próprio ou por outro sem soberba: se existe bloqueio, reverter
                 b = blocked_nick.get(after.id, None)
                 if b is not None and after.nick != b:
                     try:
@@ -1241,10 +768,8 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                     except Exception:
                         pass
     except Exception:
-        # segurança: não deixar a função explodir
         return
 
-# execução
 if __name__ == "__main__":
     token = os.getenv("TOKEN")
     if not token:
