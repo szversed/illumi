@@ -30,6 +30,11 @@ text_mutes = {}
 invite_cache = {}
 convites_por_usuario = {}
 
+# Estrutura para rastrear mensagens do face-reveal
+# {user_id_mencionado: {message_id: channel_id}}
+FACE_REVEAL_TRACKER = defaultdict(dict)
+FACE_REVEAL_FILE = "face_reveal_tracker.json"
+
 user_genders = {}
 user_preferences = {}
 
@@ -89,6 +94,26 @@ def tem_cargo_admin(member: discord.Member) -> bool:
 
 def is_exempt(member: discord.Member) -> bool:
     return member.bot or tem_cargo_admin(member)
+
+def salvar_face_reveal_tracker():
+    with open(FACE_REVEAL_FILE, 'w') as f:
+        # Converte defaultdict para dict para serialização JSON
+        serializable_tracker = {k: dict(v) for k, v in FACE_REVEAL_TRACKER.items()}
+        json.dump(serializable_tracker, f, indent=4)
+
+def carregar_face_reveal_tracker():
+    global FACE_REVEAL_TRACKER
+    if os.path.exists(FACE_REVEAL_FILE):
+        with open(FACE_REVEAL_FILE, 'r') as f:
+            try:
+                data = json.load(f)
+                # Converte de volta para defaultdict
+                FACE_REVEAL_TRACKER = defaultdict(dict, {int(k): v for k, v in data.items()})
+            except json.JSONDecodeError:
+                print("Erro ao carregar FACE_REVEAL_TRACKER. Iniciando vazio.")
+                FACE_REVEAL_TRACKER = defaultdict(dict)
+    else:
+        FACE_REVEAL_TRACKER = defaultdict(dict)
 
 def pair_key(u1_id: int, u2_id: int):
     return frozenset({u1_id, u2_id})
@@ -322,6 +347,7 @@ async def _auto_close_channel_after(canal: discord.TextChannel, segundos: int):
 async def on_ready():
     print(f"✅ {bot.user} online!")
     
+    carregar_face_reveal_tracker()
     for guild in bot.guilds:
         try:
             bot.tree.clear_commands(guild=guild)
@@ -394,6 +420,17 @@ async def verificar_text_mutes():
 
 @bot.event
 async def on_message(message: discord.Message):
+    # Lógica de rastreamento para face-reveal
+    if message.channel.name == "face-reveal" and message.mentions:
+        # Apenas a primeira menção é considerada o alvo
+        user_alvo = message.mentions[0]
+        
+        # Salva a informação: user_id_alvo -> {message_id: channel_id}
+        FACE_REVEAL_TRACKER[user_alvo.id][message.id] = message.channel.id
+        salvar_face_reveal_tracker()
+
+    # Lógica existente do bot
+
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
@@ -770,6 +807,31 @@ async def sync(interaction: discord.Interaction, guild_id: int = None):
         await interaction.followup.send(f"erro ao sincronizar: {e}", ephemeral=True)
 
 @bot.event
+async def apagar_mensagens_face_reveal(guild: discord.Guild, user_id: int):
+    if user_id in FACE_REVEAL_TRACKER:
+        mensagens_para_apagar = FACE_REVEAL_TRACKER.pop(user_id)
+        salvar_face_reveal_tracker()
+        
+        for message_id, channel_id in mensagens_para_apagar.items():
+            try:
+                canal = guild.get_channel(channel_id)
+                if canal:
+                    mensagem = await canal.fetch_message(message_id)
+                    await mensagem.delete()
+            except Exception:
+                pass
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user: discord.User):
+    # Verifica se o usuário banido foi mencionado em alguma mensagem de face-reveal
+    await apagar_mensagens_face_reveal(guild, user.id)
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    # Verifica se o membro que saiu foi mencionado em alguma mensagem de face-reveal
+    await apagar_mensagens_face_reveal(member.guild, member.id)
+
+@bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
     if not isinstance(channel, discord.TextChannel):
         return
@@ -832,9 +894,13 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     except Exception:
         return
 
-if __name__ == "__main__":
-    token = os.getenv("TOKEN")
-    if not token:
-        print("❌ variável TOKEN não encontrada. defina TOKEN no ambiente e rode novamente.")
-    else:
-        bot.run(token)
+    @bot.event
+    async def on_disconnect():
+        salvar_face_reveal_tracker()
+
+    if __name__ == "__main__":
+        token = os.getenv("TOKEN")
+        if not token:
+            print("❌ variável TOKEN não encontrada. defina TOKEN no ambiente e rode novamente.")
+        else:
+            bot.run(token)
