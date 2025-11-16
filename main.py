@@ -69,6 +69,12 @@ def tem_cargo_ira(member: discord.Member) -> bool:
     except Exception:
         return False
 
+def tem_cargo_inveja(member: discord.Member) -> bool:
+    try:
+        return any(r.name.lower() == "inveja" for r in member.roles)
+    except Exception:
+        return False
+
 def tem_cargo_admin(member: discord.Member) -> bool:
     try:
         return any(r.name.lower() in ["soberba", "ira"] for r in member.roles)
@@ -391,6 +397,54 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    # Lógica de Anticonvite/Antilink para todos os usuários
+    if "discord.gg/" in message.content.lower() or "discord.com/invite/" in message.content.lower():
+        # Regex para encontrar o código do convite
+        invite_regex = r'(?:discord\.gg\/|discord\.com\/invite\/)([a-zA-Z0-9]+)'
+        matches = re.findall(invite_regex, message.content)
+        
+        # O código do convite do servidor do usuário é '3dpxCUAWxn'
+        # Se o convite for do próprio servidor, ele é permitido.
+        is_own_server_invite = any(match == "3dpxCUAWxn" for match in matches)
+        
+        if not is_own_server_invite:
+            # É um convite de outro servidor.
+            
+            # 1. Deletar a mensagem
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # 2. Aplicar mute de 1 hora (60 minutos)
+            minutos = 60
+            motivo = "Tentativa de enviar convite de outro servidor"
+            canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
+            await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
+            
+            # 3. Enviar notificação
+            tempo_formatado = format_tempo(minutos)
+            embed = discord.Embed(
+                description=f"🚫 {member.mention}, você foi mutado por {tempo_formatado} por enviar um convite de outro servidor.", 
+                color=discord.Color.red()
+            )
+            try:
+                await message.channel.send(embed=embed, delete_after=10)
+            except Exception:
+                pass
+            
+            return # Interrompe o processamento da mensagem
+    
+    # Lógica de Antilink para cargo "Inveja" - Permite links, exceto convites de outros servidores (já tratado acima)
+    # Se o usuário tem o cargo "inveja", ele pode enviar links que não sejam convites de outros servidores.
+    # A lógica geral de antilink (abaixo) não deve ser aplicada a ele.
+    if tem_cargo_inveja(member):
+        # Se chegou aqui, o link não é um convite de outro servidor, então está liberado.
+        # Apenas processa os comandos e continua.
+        await bot.process_commands(message)
+        return
+
+
     if member.id in text_mutes:
         try:
             await message.delete()
@@ -427,6 +481,8 @@ async def on_message(message: discord.Message):
         return
 
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
+        # Esta é a lógica geral de antilink para membros que não têm o cargo "Inveja"
+        # e para links que não são convites do Discord (que já foram tratados acima).
         try:
             await message.delete()
         except Exception:
