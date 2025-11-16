@@ -275,6 +275,7 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
+        # Lógica para pausar a música
         await interaction.response.send_message("⏸️ Música pausada.", ephemeral=True)
 
     @discord.ui.button(label="▶️ Resumir", style=discord.ButtonStyle.secondary, custom_id="music_resumir")
@@ -283,6 +284,7 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
+        # Lógica para resumir a música
         await interaction.response.send_message("▶️ Música resumida.", ephemeral=True)
 
     @discord.ui.button(label="⏹️ Parar", style=discord.ButtonStyle.danger, custom_id="music_parar")
@@ -291,6 +293,7 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
+        # Lógica para parar a música
         await interaction.response.send_message("⏹️ Música parada.", ephemeral=True)
 
 def gerar_nome_pecadores(guild: discord.Guild):
@@ -394,41 +397,32 @@ async def verificar_text_mutes():
 
 @bot.event
 async def on_message(message: discord.Message):
+    # Ignora se for o próprio bot ou se não for em um servidor
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
 
     member = message.author
+    # Ignora membros com cargos administrativos
     if is_exempt(member):
         await bot.process_commands(message)
         return
 
-    # Lógica de Anticonvite/Antilink para todos os usuários
+    # Lógica de Anticonvite/Antilink de outros servidores (Permitido o próprio servidor: 3dpxCUAWxn)
     if "discord.gg/" in message.content.lower() or "discord.com/invite/" in message.content.lower():
-        # Regex para encontrar o código do convite
         invite_regex = r'(?:discord\.gg\/|discord\.com\/invite\/)([a-zA-Z0-9]+)'
         matches = re.findall(invite_regex, message.content)
-        
-        # O código do convite do servidor do usuário é '3dpxCUAWxn'
-        # Se o convite for do próprio servidor, ele é permitido.
         is_own_server_invite = any(match == "3dpxCUAWxn" for match in matches)
         
         if not is_own_server_invite:
-            # É um convite de outro servidor.
-            
-            # 1. Deletar a mensagem
             try:
                 await message.delete()
             except Exception:
                 pass
-            
-            # 2. Aplicar mute de 1 hora (60 minutos)
             minutos = 60
             motivo = "Tentativa de enviar convite de outro servidor"
             canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
             await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
-            
-            # 3. Enviar notificação
             tempo_formatado = format_tempo(minutos)
             embed = discord.Embed(
                 description=f"🚫 {member.mention}, você foi mutado por {tempo_formatado} por enviar um convite de outro servidor.", 
@@ -438,19 +432,15 @@ async def on_message(message: discord.Message):
                 await message.channel.send(embed=embed, delete_after=10)
             except Exception:
                 pass
-            
-            return # Interrompe o processamento da mensagem
+            return 
     
-    # Lógica de Antilink para cargo "Inveja" - Permite links, exceto convites de outros servidores (já tratado acima)
-    # Se o usuário tem o cargo "inveja", ele pode enviar links que não sejam convites de outros servidores.
-    # A lógica geral de antilink (abaixo) não deve ser aplicada a ele.
+    # Exceção para Antilink (Inveja ou Boosters podem enviar outros links)
     if tem_cargo_inveja(member) or tem_cargo_boost(member):
-        # Se chegou aqui, o link não é um convite de outro servidor, então está liberado.
-        # Apenas processa os comandos e continua.
+        # Se chegou aqui, o link não é um convite de outro servidor (já tratado acima), então está liberado.
         await bot.process_commands(message)
         return
 
-
+    # Se estiver mutado em texto, deleta a mensagem
     if member.id in text_mutes:
         try:
             await message.delete()
@@ -461,34 +451,58 @@ async def on_message(message: discord.Message):
     now = time.time()
     canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
 
+    # 🚨 NOVO: Lógica de Anti-Spam de Comandos (10 comandos em 10 segundos = BAN)
+    is_command = message.content.startswith("!") or message.content.startswith("/")
+
     dq = user_msg_times[member.id]
-    dq.append(now)
+    
+    # Adiciona à fila SOMENTE se for um COMANDO (prefixo OU slash)
+    if is_command:
+        dq.append(now)
+    
+    # Processa a fila, removendo tempos antigos
     while dq and now - dq[0] > FLOOD_WINDOW:
         dq.popleft()
-    if len(dq) > FLOOD_LIMIT:
+        
+    # Verifica o limite de comandos (FLOOD_LIMIT = 10 e FLOOD_WINDOW = 10.0)
+    if len(dq) > FLOOD_LIMIT: 
+        
+        # 1. Apagar as mensagens
         try:
-            deleted = await message.channel.purge(limit=100, check=lambda m: m.author.id == member.id and now - m.created_at.timestamp() <= FLOOD_WINDOW)
+            # Apaga até 100 mensagens no canal que o usuário enviou nos últimos 10 segundos
+            deleted = await message.channel.purge(
+                limit=100, 
+                check=lambda m: m.author.id == member.id and now - m.created_at.timestamp() <= FLOOD_WINDOW
+            )
         except Exception:
             deleted = []
+            
+        # 2. Banir o usuário
         try:
-            await message.guild.ban(member, reason=f"Flood de mensagens diferentes: >{FLOOD_LIMIT} msgs em {FLOOD_WINDOW}s")
+            await message.guild.ban(member, reason=f"Spam de comandos: >{FLOOD_LIMIT} comandos em {FLOOD_WINDOW}s")
+            
+            # 3. Enviar notificação de banimento
             try:
-                await message.channel.send(f"🔨 {member.mention} banido por flood. {len(deleted)} mensagens apagadas.", delete_after=7)
+                await message.channel.send(f"🔨 {member.mention} banido por spam de comandos. {len(deleted)} mensagens apagadas.", delete_after=7)
             except Exception:
                 pass
+                
         except Exception:
+            # Se o ban falhar, registra no log
             if canal_log:
                 try:
-                    await canal_log.send(f"⚠️ tentativa de ban automático falhou para {member.mention}.")
+                    await canal_log.send(f"⚠️ Tentativa de ban automático por spam de comandos falhou para {member.mention}.")
                 except Exception:
                     pass
+                    
         finally:
+            # Limpa o registro do usuário
             user_msg_times.pop(member.id, None)
         return
+    # ------------------------------------------------
 
+    # Lógica de Antilink Geral (para quem não tem o cargo Inveja/Boost)
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
-        # Esta é a lógica geral de antilink para membros que não têm o cargo "Inveja"
-        # e para links que não são convites do Discord (que já foram tratados acima).
         try:
             await message.delete()
         except Exception:
@@ -500,6 +514,7 @@ async def on_message(message: discord.Message):
             pass
         return
 
+    # Lógica de Repetição (5 mensagens iguais = Mute)
     conteudo = re.sub(r'\s+', ' ', message.content.strip().lower())
     prev = last_msg.get(member.id)
     user_repeat_msgs[member.id].append(message)
