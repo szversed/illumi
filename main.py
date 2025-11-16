@@ -75,6 +75,12 @@ def tem_cargo_inveja(member: discord.Member) -> bool:
     except Exception:
         return False
 
+def tem_cargo_boost(member: discord.Member) -> bool:
+    try:
+        return any(r.name.lower() == "boost" for r in member.roles)
+    except Exception:
+        return False
+
 def tem_cargo_admin(member: discord.Member) -> bool:
     try:
         return any(r.name.lower() in ["soberba", "ira"] for r in member.roles)
@@ -438,7 +444,7 @@ async def on_message(message: discord.Message):
     # Lógica de Antilink para cargo "Inveja" - Permite links, exceto convites de outros servidores (já tratado acima)
     # Se o usuário tem o cargo "inveja", ele pode enviar links que não sejam convites de outros servidores.
     # A lógica geral de antilink (abaixo) não deve ser aplicada a ele.
-    if tem_cargo_inveja(member):
+    if tem_cargo_inveja(member) or tem_cargo_boost(member):
         # Se chegou aqui, o link não é um convite de outro servidor, então está liberado.
         # Apenas processa os comandos e continua.
         await bot.process_commands(message)
