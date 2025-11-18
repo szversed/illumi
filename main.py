@@ -42,6 +42,7 @@ SHORT_MSG_WINDOW = 10.0
 user_short_msgs = defaultdict(lambda: deque())
 
 last_msg = {}
+last_msg_time = {}
 repeat_count = defaultdict(int)
 mute_level = defaultdict(int)
 user_repeat_msgs = defaultdict(list)
@@ -481,9 +482,11 @@ async def on_message(message: discord.Message):
             user_msg_times.pop(member.id, None)
         return
 
+    # 🚨 Lógica de Anti-Mensagens Curtas (+5 mensagens com <3 caracteres em 10s = Mute)
     dq_short = user_short_msgs[member.id]
 
-    if len(message.content.strip()) < 3:
+    content_clean = message.content.strip()
+    if len(content_clean) < 3 and content_clean != "":
         dq_short.append(now)
 
     while dq_short and now - dq_short[0] > SHORT_MSG_WINDOW:
@@ -496,15 +499,26 @@ async def on_message(message: discord.Message):
         motivo = f"muitas mensagens curtas ({len(dq_short)}x) - nível {mute_level[member.id]}"
         
         try:
-            deleted = await message.channel.purge(
-                limit=SHORT_MSG_LIMIT,
-                check=lambda m: m.author.id == member.id and len(m.content.strip()) < 3
-            )
+            async for msg in message.channel.history(limit=50):
+                if msg.author.id == member.id and len(msg.content.strip()) < 3 and msg.content.strip() != "":
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
         except Exception:
             pass
         
         await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
         user_short_msgs.pop(member.id, None)
+        
+        embed = discord.Embed(
+            description=f"🚫 {member.mention} mutado por {minutos}min por spam de mensagens curtas.", 
+            color=discord.Color.red()
+        )
+        try:
+            await message.channel.send(embed=embed, delete_after=10)
+        except Exception:
+            pass
         return
 
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
@@ -519,23 +533,38 @@ async def on_message(message: discord.Message):
             pass
         return
 
+    # 🚨 Lógica de Repetição (5 mensagens iguais em 15 segundos = Mute)
     conteudo = re.sub(r'\s+', ' ', message.content.strip().lower())
     prev = last_msg.get(member.id)
     user_repeat_msgs[member.id].append(message)
 
+    # Atualiza timestamp da última mensagem
+    last_msg_time[member.id] = now
+
+    # Remove mensagens antigas da lista de repetição (acima de 15 segundos)
+    user_repeat_msgs[member.id] = [msg for msg in user_repeat_msgs[member.id] if now - msg.created_at.timestamp() <= 15.0]
+
+    # Conta apenas mensagens dentro da janela de 15 segundos
+    recent_repeats = 0
     if prev and conteudo != "":
         if conteudo == prev:
-            repeat_count[member.id] += 1
+            # Conta quantas mensagens iguais tem nos últimos 15 segundos
+            for msg in user_repeat_msgs[member.id]:
+                msg_content = re.sub(r'\s+', ' ', msg.content.strip().lower())
+                if msg_content == conteudo:
+                    recent_repeats += 1
         else:
-            repeat_count[member.id] = 1
+            # Nova mensagem diferente, reinicia contagem
+            recent_repeats = 1
             last_msg[member.id] = conteudo
             user_repeat_msgs[member.id] = [message]
     else:
-        repeat_count[member.id] = 1
+        recent_repeats = 1
         last_msg[member.id] = conteudo
         user_repeat_msgs[member.id] = [message]
 
-    if repeat_count[member.id] >= 5:
+    # Aplica mute se tiver 5 mensagens iguais nos últimos 15 segundos
+    if recent_repeats >= 5:
         if member.id not in mute_level:
             minutos = 5
             mute_level[member.id] = 1
@@ -543,17 +572,30 @@ async def on_message(message: discord.Message):
             minutos = 50
             mute_level[member.id] = 2
         
-        motivo = f"repetição ({repeat_count[member.id]}x)"
-        for msg_to_delete in list(user_repeat_msgs[member.id]):
+        motivo = f"repetição ({recent_repeats}x em 15s)"
+        
+        # Deleta todas as mensagens repetidas recentes
+        for msg_to_delete in user_repeat_msgs[member.id]:
             try:
                 await msg_to_delete.delete()
             except Exception:
                 pass
         
         await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
+        
+        # Limpa os dados de repetição
         repeat_count[member.id] = 0
         last_msg[member.id] = None
         user_repeat_msgs[member.id] = []
+        
+        embed = discord.Embed(
+            description=f"🚫 {member.mention} mutado por {minutos}min por repetir a mesma mensagem {recent_repeats}x.", 
+            color=discord.Color.red()
+        )
+        try:
+            await message.channel.send(embed=embed, delete_after=10)
+        except Exception:
+            pass
         return
 
     await bot.process_commands(message)
