@@ -37,6 +37,10 @@ FLOOD_LIMIT = 10
 FLOOD_WINDOW = 10.0
 user_msg_times = defaultdict(lambda: deque())
 
+SHORT_MSG_LIMIT = 5
+SHORT_MSG_WINDOW = 10.0
+user_short_msgs = defaultdict(lambda: deque())
+
 last_msg = {}
 repeat_count = defaultdict(int)
 mute_level = defaultdict(int)
@@ -275,7 +279,6 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
-        # Lógica para pausar a música
         await interaction.response.send_message("⏸️ Música pausada.", ephemeral=True)
 
     @discord.ui.button(label="▶️ Resumir", style=discord.ButtonStyle.secondary, custom_id="music_resumir")
@@ -284,7 +287,6 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
-        # Lógica para resumir a música
         await interaction.response.send_message("▶️ Música resumida.", ephemeral=True)
 
     @discord.ui.button(label="⏹️ Parar", style=discord.ButtonStyle.danger, custom_id="music_parar")
@@ -293,7 +295,6 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("❌ Você só pode controlar sua própria música!", ephemeral=True)
             return
         
-        # Lógica para parar a música
         await interaction.response.send_message("⏹️ Música parada.", ephemeral=True)
 
 def gerar_nome_pecadores(guild: discord.Guild):
@@ -397,18 +398,15 @@ async def verificar_text_mutes():
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Ignora se for o próprio bot ou se não for em um servidor
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
 
     member = message.author
-    # Ignora membros com cargos administrativos
     if is_exempt(member):
         await bot.process_commands(message)
         return
 
-    # Lógica de Anticonvite/Antilink de outros servidores (Permitido o próprio servidor: 3dpxCUAWxn)
     if "discord.gg/" in message.content.lower() or "discord.com/invite/" in message.content.lower():
         invite_regex = r'(?:discord\.gg\/|discord\.com\/invite\/)([a-zA-Z0-9]+)'
         matches = re.findall(invite_regex, message.content)
@@ -434,13 +432,10 @@ async def on_message(message: discord.Message):
                 pass
             return 
     
-    # Exceção para Antilink (Inveja ou Boosters podem enviar outros links)
     if tem_cargo_inveja(member) or tem_cargo_boost(member):
-        # Se chegou aqui, o link não é um convite de outro servidor (já tratado acima), então está liberado.
         await bot.process_commands(message)
         return
 
-    # Se estiver mutado em texto, deleta a mensagem
     if member.id in text_mutes:
         try:
             await message.delete()
@@ -451,25 +446,18 @@ async def on_message(message: discord.Message):
     now = time.time()
     canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
 
-    # 🚨 NOVO: Lógica de Anti-Spam de Comandos (10 comandos em 10 segundos = BAN)
     is_command = message.content.startswith("!") or message.content.startswith("/")
 
     dq = user_msg_times[member.id]
     
-    # Adiciona à fila SOMENTE se for um COMANDO (prefixo OU slash)
     if is_command:
         dq.append(now)
     
-    # Processa a fila, removendo tempos antigos
     while dq and now - dq[0] > FLOOD_WINDOW:
         dq.popleft()
         
-    # Verifica o limite de comandos (FLOOD_LIMIT = 10 e FLOOD_WINDOW = 10.0)
     if len(dq) > FLOOD_LIMIT: 
-        
-        # 1. Apagar as mensagens
         try:
-            # Apaga até 100 mensagens no canal que o usuário enviou nos últimos 10 segundos
             deleted = await message.channel.purge(
                 limit=100, 
                 check=lambda m: m.author.id == member.id and now - m.created_at.timestamp() <= FLOOD_WINDOW
@@ -477,31 +465,48 @@ async def on_message(message: discord.Message):
         except Exception:
             deleted = []
             
-        # 2. Banir o usuário
         try:
             await message.guild.ban(member, reason=f"Spam de comandos: >{FLOOD_LIMIT} comandos em {FLOOD_WINDOW}s")
-            
-            # 3. Enviar notificação de banimento
             try:
                 await message.channel.send(f"🔨 {member.mention} banido por spam de comandos. {len(deleted)} mensagens apagadas.", delete_after=7)
             except Exception:
                 pass
-                
         except Exception:
-            # Se o ban falhar, registra no log
             if canal_log:
                 try:
                     await canal_log.send(f"⚠️ Tentativa de ban automático por spam de comandos falhou para {member.mention}.")
                 except Exception:
                     pass
-                    
         finally:
-            # Limpa o registro do usuário
             user_msg_times.pop(member.id, None)
         return
-    # ------------------------------------------------
 
-    # Lógica de Antilink Geral (para quem não tem o cargo Inveja/Boost)
+    dq_short = user_short_msgs[member.id]
+
+    if len(message.content.strip()) < 3:
+        dq_short.append(now)
+
+    while dq_short and now - dq_short[0] > SHORT_MSG_WINDOW:
+        dq_short.popleft()
+
+    if len(dq_short) >= SHORT_MSG_LIMIT:
+        nivel = mute_level.get(member.id, 0)
+        minutos = 5 if nivel == 0 else 10 if nivel == 1 else 20
+        mute_level[member.id] = min(nivel + 1, 3)
+        motivo = f"muitas mensagens curtas ({len(dq_short)}x) - nível {mute_level[member.id]}"
+        
+        try:
+            deleted = await message.channel.purge(
+                limit=SHORT_MSG_LIMIT,
+                check=lambda m: m.author.id == member.id and len(m.content.strip()) < 3
+            )
+        except Exception:
+            pass
+        
+        await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
+        user_short_msgs.pop(member.id, None)
+        return
+
     if antilink_ativo and ("http://" in message.content or "https://" in message.content):
         try:
             await message.delete()
@@ -514,7 +519,6 @@ async def on_message(message: discord.Message):
             pass
         return
 
-    # Lógica de Repetição (5 mensagens iguais = Mute)
     conteudo = re.sub(r'\s+', ' ', message.content.strip().lower())
     prev = last_msg.get(member.id)
     user_repeat_msgs[member.id].append(message)
@@ -532,15 +536,20 @@ async def on_message(message: discord.Message):
         user_repeat_msgs[member.id] = [message]
 
     if repeat_count[member.id] >= 5:
-        nivel = mute_level.get(member.id, 0)
-        minutos = 5 if nivel == 0 else 10 if nivel == 1 else 20
-        mute_level[member.id] = min(nivel + 1, 3)
-        motivo = f"repetição ({repeat_count[member.id]}x) - nível {mute_level[member.id]}"
+        if member.id not in mute_level:
+            minutos = 5
+            mute_level[member.id] = 1
+        else:
+            minutos = 50
+            mute_level[member.id] = 2
+        
+        motivo = f"repetição ({repeat_count[member.id]}x)"
         for msg_to_delete in list(user_repeat_msgs[member.id]):
             try:
                 await msg_to_delete.delete()
             except Exception:
                 pass
+        
         await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
         repeat_count[member.id] = 0
         last_msg[member.id] = None
