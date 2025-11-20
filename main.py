@@ -41,6 +41,13 @@ SHORT_MSG_LIMIT = 5
 SHORT_MSG_WINDOW = 10.0
 user_short_msgs = defaultdict(lambda: deque())
 
+# 🆕 SISTEMA PARA FIGURINHAS
+STICKER_FLOOD_LIMIT = 8  # +8 figurinhas diferentes em 10s = MUTE
+STICKER_REPEAT_LIMIT = 5  # +5 figurinhas IGUAIS em 15s = MUTE
+user_sticker_times = defaultdict(lambda: deque())
+user_sticker_repeats = defaultdict(list)  # Para figurinhas repetidas
+last_sticker = {}  # Última figurinha enviada
+
 last_msg = {}
 last_msg_time = {}
 repeat_count = defaultdict(int)
@@ -408,6 +415,104 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    now = time.time()
+    canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
+
+    # 🆕 VERIFICAÇÃO DE SPAM DE FIGURINHAS
+    if message.stickers:
+        # 🚨 Anti-Flood: Muitas figurinhas diferentes em pouco tempo
+        sticker_dq = user_sticker_times[member.id]
+        sticker_dq.append(now)
+        
+        # Limpa figurinhas antigas (10 segundos)
+        while sticker_dq and now - sticker_dq[0] > FLOOD_WINDOW:
+            sticker_dq.popleft()
+        
+        # Se +8 figurinhas em 10 segundos = MUTE
+        if len(sticker_dq) >= STICKER_FLOOD_LIMIT:
+            nivel = mute_level.get(member.id, 0)
+            minutos = 15 if nivel == 0 else 30 if nivel == 1 else 60
+            mute_level[member.id] = min(nivel + 1, 3)
+            motivo = f"spam de figurinhas ({len(sticker_dq)} em {FLOOD_WINDOW}s)"
+            
+            # Tenta deletar as figurinhas recentes
+            try:
+                async for msg in message.channel.history(limit=20):
+                    if msg.author.id == member.id and msg.stickers:
+                        try:
+                            await msg.delete()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            
+            await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
+            user_sticker_times.pop(member.id, None)
+            
+            embed = discord.Embed(
+                description=f"🚫 {member.mention} mutado por {minutos}min por spam de figurinhas.", 
+                color=discord.Color.red()
+            )
+            try:
+                await message.channel.send(embed=embed, delete_after=10)
+            except Exception:
+                pass
+            return
+        
+        # 🚨 Anti-Repetição: Figurinhas IGUAIS seguidas (igual mensagens)
+        current_sticker_id = message.stickers[0].id if message.stickers else None
+        
+        if current_sticker_id:
+            # Adiciona à lista de figurinhas recentes
+            user_sticker_repeats[member.id].append({
+                'sticker_id': current_sticker_id,
+                'timestamp': now,
+                'message': message
+            })
+            
+            # Remove figurinhas antigas (15 segundos)
+            user_sticker_repeats[member.id] = [
+                s for s in user_sticker_repeats[member.id] 
+                if now - s['timestamp'] <= 15.0
+            ]
+            
+            # Conta quantas vezes a MESMA figurinha apareceu nos últimos 15s
+            same_sticker_count = sum(
+                1 for s in user_sticker_repeats[member.id] 
+                if s['sticker_id'] == current_sticker_id
+            )
+            
+            # Se 5+ figurinhas IGUAIS em 15 segundos = MUTE
+            if same_sticker_count >= STICKER_REPEAT_LIMIT:
+                nivel = mute_level.get(member.id, 0)
+                minutos = 5 if nivel == 0 else 10 if nivel == 1 else 20
+                mute_level[member.id] = min(nivel + 1, 3)
+                motivo = f"repetição de figurinhas ({same_sticker_count}x a mesma em 15s)"
+                
+                # Deleta todas as figurinhas repetidas
+                for sticker_data in user_sticker_repeats[member.id]:
+                    if sticker_data['sticker_id'] == current_sticker_id:
+                        try:
+                            await sticker_data['message'].delete()
+                        except Exception:
+                            pass
+                
+                await aplicar_mute_texto(message.guild, member, minutos, motivo, canal_log)
+                
+                # Limpa os dados
+                user_sticker_repeats[member.id] = []
+                last_sticker[member.id] = None
+                
+                embed = discord.Embed(
+                    description=f"🚫 {member.mention} mutado por {minutos}min por repetir a mesma figurinha {same_sticker_count}x.", 
+                    color=discord.Color.red()
+                )
+                try:
+                    await message.channel.send(embed=embed, delete_after=10)
+                except Exception:
+                    pass
+                return
+
     if "discord.gg/" in message.content.lower() or "discord.com/invite/" in message.content.lower():
         invite_regex = r'(?:discord\.gg\/|discord\.com\/invite\/)([a-zA-Z0-9]+)'
         matches = re.findall(invite_regex, message.content)
@@ -443,9 +548,6 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
         return
-
-    now = time.time()
-    canal_log = discord.utils.get(message.guild.text_channels, name="mod-logs")
 
     is_command = message.content.startswith("!") or message.content.startswith("/")
 
