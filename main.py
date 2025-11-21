@@ -9,7 +9,6 @@ from collections import defaultdict, deque
 
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
 
 intents = discord.Intents.default()
 intents.members = True
@@ -17,7 +16,7 @@ intents.message_content = True
 intents.guilds = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=".", intents=intents)
 
 PAIR_COOLDOWNS = {}
 PAIR_COOLDOWN_SECONDS = 3 * 60
@@ -333,18 +332,9 @@ async def _auto_close_channel_after(canal: discord.TextChannel, segundos: int):
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online!")
-    
-    for guild in bot.guilds:
-        try:
-            bot.tree.clear_commands(guild=guild)
-            await bot.tree.sync(guild=guild)
-        except Exception:
-            pass
-    try:
-        await bot.tree.sync()
-    except Exception:
-        pass
-    print("✅ comandos sincronizados")
+    print(f"📝 Prefixo: .")
+    print(f"🔧 Comandos disponíveis: .menu_admin, .clear, .ban, .mute, .link, .falar, .mutecall, .muteall")
+
     for guild in bot.guilds:
         await atualizar_convites_safe(guild)
     if not verificar_text_mutes.is_running():
@@ -549,7 +539,7 @@ async def on_message(message: discord.Message):
             pass
         return
 
-    is_command = message.content.startswith("!") or message.content.startswith("/")
+    is_command = message.content.startswith(".")
 
     dq = user_msg_times[member.id]
     
@@ -615,7 +605,7 @@ async def on_message(message: discord.Message):
         
         embed = discord.Embed(
             description=f"🚫 {member.mention} mutado por {minutos}min por spam de mensagens curtas.", 
-            color=discord.Color.red()
+                color=discord.Color.red()
         )
         try:
             await message.channel.send(embed=embed, delete_after=10)
@@ -702,64 +692,69 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
-@bot.tree.command(name="menu_admin", description="menu administrativo")
-async def menu_admin(interaction: discord.Interaction):
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+# COMANDOS COM PREFIXO .
+@bot.command(name="menu_admin")
+async def menu_admin(ctx):
+    """Menu administrativo"""
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
         return
-    texto = "🧹 /clear \n🔨 /ban <usuário(s)>\n🔇 /mute <usuário(s)>\n🚫 /link <on|off>\n💬 /falar \n🔊 /mutecall <on|off>\n🌐 /muteall <on|off>"
+    texto = "🧹 .clear \n🔨 .ban <usuário(s)>\n🔇 .mute <usuário(s)>\n🚫 .link <on|off>\n💬 .falar \n🔊 .mutecall <on|off>\n🌐 .muteall <on|off>"
     embed = discord.Embed(title="👑 Menu Administrativo", description=texto, color=discord.Color.gold())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await ctx.send(embed=embed)
 
-@bot.tree.command(name="clear", description="apaga mensagens")
-@app_commands.describe(quantidade="quantas mensagens apagar (1-100)")
-async def clear(interaction: discord.Interaction, quantidade: int):
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+@bot.command(name="clear")
+async def clear(ctx, quantidade: int):
+    """Apaga mensagens (1-100)"""
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
         return
-    await interaction.response.defer(ephemeral=True)
+    
+    if quantidade < 1 or quantidade > 100:
+        await ctx.send("❌ Quantidade deve ser entre 1 e 100")
+        return
+        
     try:
-        deleted = await interaction.channel.purge(limit=quantidade)
-        embed = discord.Embed(title="🧹 Limpeza concluída", description=f"{len(deleted)} mensagens apagadas", color=discord.Color.dark_gray())
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        deleted = await ctx.channel.purge(limit=quantidade + 1)  # +1 para incluir o comando
+        embed = discord.Embed(title="🧹 Limpeza concluída", description=f"{len(deleted) - 1} mensagens apagadas", color=discord.Color.dark_gray())
+        await ctx.send(embed=embed, delete_after=10)
     except Exception:
-        await interaction.followup.send("erro ao apagar mensagens", ephemeral=True)
+        await ctx.send("❌ erro ao apagar mensagens")
 
-@bot.tree.command(name="ban", description="bane usuário(s)")
-@app_commands.describe(usuario="usuário a banir (múltiplos se for soberba)")
-@app_commands.rename(usuario="usuario")
-async def ban(interaction: discord.Interaction, usuario: str):
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+@bot.command(name="ban")
+async def ban(ctx, *, usuario: str):
+    """Bane usuário(s) - mencione os usuários"""
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
         return
     
     membros_alvo = []
     
-    if tem_cargo_soberba(interaction.user):
+    if tem_cargo_soberba(ctx.author):
         mencoes = re.findall(r'<@!?(\d+)>', usuario)
         if not mencoes:
-            await interaction.response.send_message("❌ Soberba: Você deve mencionar um ou mais usuários.", ephemeral=True)
+            await ctx.send("❌ Soberba: Você deve mencionar um ou mais usuários.")
             return
         
         for user_id in mencoes:
-            member = interaction.guild.get_member(int(user_id))
+            member = ctx.guild.get_member(int(user_id))
             if member:
                 membros_alvo.append(member)
     else:
         mencoes = re.findall(r'<@!?(\d+)>', usuario)
         if len(mencoes) != 1:
-            await interaction.response.send_message("❌ Ira: Você deve mencionar exatamente um usuário.", ephemeral=True)
+            await ctx.send("❌ Ira: Você deve mencionar exatamente um usuário.")
             return
         
-        member = interaction.guild.get_member(int(mencoes[0]))
+        member = ctx.guild.get_member(int(mencoes[0]))
         if member:
             membros_alvo.append(member)
         else:
-            await interaction.response.send_message("❌ Usuário não encontrado.", ephemeral=True)
+            await ctx.send("❌ Usuário não encontrado.")
             return
 
     if not membros_alvo:
-        await interaction.response.send_message("❌ Nenhum usuário válido encontrado para banir.", ephemeral=True)
+        await ctx.send("❌ Nenhum usuário válido encontrado para banir.")
         return
 
     banidos = []
@@ -767,61 +762,64 @@ async def ban(interaction: discord.Interaction, usuario: str):
     
     for membro in membros_alvo:
         try:
-            await interaction.guild.ban(membro, reason=f"Banido por {interaction.user}")
+            await ctx.guild.ban(membro, reason=f"Banido por {ctx.author}")
             banidos.append(membro.mention)
         except Exception:
             erros.append(membro.mention)
 
     if banidos:
         embed = discord.Embed(title="🔨 Banido(s)", description=f"{', '.join(banidos)} foram banidos.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed)
+        await ctx.send(embed=embed)
     else:
-        await interaction.response.send_message("❌ Erro ao banir todos os usuários mencionados.", ephemeral=True)
+        await ctx.send("❌ Erro ao banir todos os usuários mencionados.")
 
-@bot.tree.command(name="mute", description="mute usuário(s)")
-@app_commands.describe(tempo="tempo em minutos (1-10080)", usuario="usuário a ser mutado (múltiplos se for soberba)")
-@app_commands.rename(usuario="usuario")
-async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 1, 10080], usuario: str):
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+@bot.command(name="mute")
+async def mute(ctx, tempo: int, *, usuario: str):
+    """Muta usuário(s) - .mute 30 @usuário"""
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
+        return
+    
+    if tempo < 1 or tempo > 10080:
+        await ctx.send("❌ Tempo deve ser entre 1 e 10080 minutos")
         return
     
     membros_alvo = []
     
-    if tem_cargo_soberba(interaction.user):
+    if tem_cargo_soberba(ctx.author):
         mencoes = re.findall(r'<@!?(\d+)>', usuario)
         if not mencoes:
-            await interaction.response.send_message("❌ Soberba: Você deve mencionar um ou mais usuários.", ephemeral=True)
+            await ctx.send("❌ Soberba: Você deve mencionar um ou mais usuários.")
             return
         
         for user_id in mencoes:
-            member = interaction.guild.get_member(int(user_id))
+            member = ctx.guild.get_member(int(user_id))
             if member:
                 membros_alvo.append(member)
     else:
         mencoes = re.findall(r'<@!?(\d+)>', usuario)
         if len(mencoes) != 1:
-            await interaction.response.send_message("❌ Ira: Você deve mencionar exatamente um usuário.", ephemeral=True)
+            await ctx.send("❌ Ira: Você deve mencionar exatamente um usuário.")
             return
         
-        member = interaction.guild.get_member(int(mencoes[0]))
+        member = ctx.guild.get_member(int(mencoes[0]))
         if member:
             membros_alvo.append(member)
         else:
-            await interaction.response.send_message("❌ Usuário não encontrado.", ephemeral=True)
+            await ctx.send("❌ Usuário não encontrado.")
             return
 
     if not membros_alvo:
-        await interaction.response.send_message("❌ Nenhum usuário válido encontrado para mutar.", ephemeral=True)
+        await ctx.send("❌ Nenhum usuário válido encontrado para mutar.")
         return
 
-    canal_log = discord.utils.get(interaction.guild.text_channels, name="mod-logs")
+    canal_log = discord.utils.get(ctx.guild.text_channels, name="mod-logs")
     tempo_formatado = format_tempo(tempo)
     mutados = []
     
     for membro in membros_alvo:
         try:
-            await aplicar_mute_texto(interaction.guild, membro, tempo, f"Comando por {interaction.user}", canal_log)
+            await aplicar_mute_texto(ctx.guild, membro, tempo, f"Comando por {ctx.author}", canal_log)
             mutados.append(membro.mention)
         except Exception:
             pass
@@ -832,16 +830,16 @@ async def mute(interaction: discord.Interaction, tempo: app_commands.Range[int, 
             description=f"{', '.join(mutados)} mutado(s) por {tempo_formatado}.\nO(s) usuário(s) não poderá(ão) enviar mensagens em nenhum canal de texto.",
             color=discord.Color.purple()
         )
-        await interaction.response.send_message(embed=embed)
+        await ctx.send(embed=embed)
     else:
-        await interaction.response.send_message("❌ Erro ao mutar os usuários mencionados.", ephemeral=True)
+        await ctx.send("❌ Erro ao mutar os usuários mencionados.")
 
-@bot.tree.command(name="link", description="ativa/desativa antilink")
-@app_commands.describe(estado="on ou off")
-async def link(interaction: discord.Interaction, estado: str):
+@bot.command(name="link")
+async def link(ctx, estado: str):
+    """Ativa/desativa antilink - .link on ou .link off"""
     global antilink_ativo
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
         return
     if estado.lower() == "on":
         antilink_ativo = True
@@ -850,58 +848,58 @@ async def link(interaction: discord.Interaction, estado: str):
         antilink_ativo = False
         embed = discord.Embed(title="✅ Antilink desativado", color=discord.Color.green())
     else:
-        await interaction.response.send_message("use on ou off.", ephemeral=True)
+        await ctx.send("❌ use on ou off.")
         return
-    await interaction.response.send_message(embed=embed)
+    await ctx.send(embed=embed)
 
-@bot.tree.command(name="falar", description="bot envia mensagem")
-@app_commands.describe(mensagem="mensagem a ser enviada")
-async def falar(interaction: discord.Interaction, mensagem: str):
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+@bot.command(name="falar")
+async def falar(ctx, *, mensagem: str):
+    """Bot envia mensagem - .falar texto"""
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
         return
-    await interaction.response.send_message("✅ Mensagem enviada", ephemeral=True)
     try:
-        await interaction.channel.send(mensagem)
+        await ctx.send(mensagem)
+        await ctx.message.delete()
     except Exception:
         pass
 
-@bot.tree.command(name="mutecall", description="muta/desmuta todos em call")
-@app_commands.describe(estado="on ou off")
-async def mutecall(interaction: discord.Interaction, estado: str):
+@bot.command(name="mutecall")
+async def mutecall(ctx, estado: str):
+    """Muta/desmuta todos em call - .mutecall on ou .mutecall off"""
     global mute_call_ativo
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
         return
     
-    canal_log = discord.utils.get(interaction.guild.text_channels, name="mod-logs")
+    canal_log = discord.utils.get(ctx.guild.text_channels, name="mod-logs")
     
     if estado.lower() == "on":
         mute_call_ativo = True
-        for voice_channel in interaction.guild.voice_channels:
-            await aplicar_mute_call(interaction.guild, voice_channel, f"Comando por {interaction.user}", canal_log)
+        for voice_channel in ctx.guild.voice_channels:
+            await aplicar_mute_call(ctx.guild, voice_channel, f"Comando por {ctx.author}", canal_log)
         embed = discord.Embed(title="🔇 Mute em Call Ativado", color=discord.Color.orange())
     elif estado.lower() == "off":
         mute_call_ativo = False
-        for voice_channel in interaction.guild.voice_channels:
-            await remover_mute_call(interaction.guild, voice_channel, canal_log)
+        for voice_channel in ctx.guild.voice_channels:
+            await remover_mute_call(ctx.guild, voice_channel, canal_log)
         embed = discord.Embed(title="🔊 Mute em Call Desativado", color=discord.Color.green())
     else:
-        await interaction.response.send_message("use on ou off.", ephemeral=True)
+        await ctx.send("❌ use on ou off.")
         return
-    await interaction.response.send_message(embed=embed)
+    await ctx.send(embed=embed)
 
-@bot.tree.command(name="muteall", description="muta/desmuta todos os canais de texto")
-@app_commands.describe(estado="on ou off")
-async def muteall(interaction: discord.Interaction, estado: str):
+@bot.command(name="muteall")
+async def muteall(ctx, estado: str):
+    """Muta/desmuta todos os canais de texto - .muteall on ou .muteall off"""
     global mute_all_ativo
-    if not tem_cargo_admin(interaction.user):
-        await interaction.response.send_message("🚫 sem permissão", ephemeral=True)
+    if not tem_cargo_admin(ctx.author):
+        await ctx.send("🚫 sem permissão")
         return
     
     if estado.lower() == "on":
         mute_all_ativo = True
-        canais_bloqueados = await bloquear_todos_canais_texto(interaction.guild, f"Comando por {interaction.user}")
+        canais_bloqueados = await bloquear_todos_canais_texto(ctx.guild, f"Comando por {ctx.author}")
         embed = discord.Embed(
             title="🌐 MUTEALL ATIVADO", 
             description=f"Todos os canais de texto foram bloqueados.\n{canais_bloqueados} canais afetados.",
@@ -909,33 +907,16 @@ async def muteall(interaction: discord.Interaction, estado: str):
         )
     elif estado.lower() == "off":
         mute_all_ativo = False
-        canais_desbloqueados = await desbloquear_todos_canais_texto(interaction.guild)
+        canais_desbloqueados = await desbloquear_todos_canais_texto(ctx.guild)
         embed = discord.Embed(
             title="🌐 MUTEALL DESATIVADO", 
             description=f"Todos os canais de texto foram desbloqueados.\n{canais_desbloqueados} canais afetados.",
             color=discord.Color.green()
         )
     else:
-        await interaction.response.send_message("use on ou off.", ephemeral=True)
+        await ctx.send("❌ use on ou off.")
         return
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="sync", description="sincroniza comandos (admin)")
-async def sync(interaction: discord.Interaction, guild_id: int = None):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("🚫 apenas administradores podem usar isso", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    try:
-        if guild_id:
-            guild = discord.Object(id=guild_id)
-            await bot.tree.sync(guild=guild)
-            await interaction.followup.send(f"✅ comandos sincronizados no guild {guild_id}", ephemeral=True)
-        else:
-            await bot.tree.sync()
-            await interaction.followup.send("✅ comandos sincronizados globalmente", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"erro ao sincronizar: {e}", ephemeral=True)
+    await ctx.send(embed=embed)
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
